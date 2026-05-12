@@ -1,0 +1,9 @@
+venv
+.env
+*.log
+*.scv
+*.txt
+artifacts
+data
+*.cpp
+tmp
