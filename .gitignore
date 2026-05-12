@@ -6,4 +6,6 @@ venv
 artifacts
 data
 *.cpp
-tmp
+tmp.DS_Store
+.python-version
+__pycache__/
