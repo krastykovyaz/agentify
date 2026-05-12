@@ -20,6 +20,7 @@ import pandas as pd
 import torch
 from datasets import Dataset
 from transformers import EarlyStoppingCallback, TrainingArguments
+import inspect
 from trl import SFTTrainer
 
 
@@ -180,33 +181,45 @@ def main() -> None:
         print(f"Train size: {len(train_dataset)} | Eval disabled")
 
     print("=== Building trainer ===")
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        num_train_epochs=args.num_train_epochs,
-        learning_rate=args.learning_rate,
-        warmup_ratio=args.warmup_ratio,
-        weight_decay=args.weight_decay,
-        lr_scheduler_type="cosine",
-        optim="adamw_8bit",
-        fp16=not torch.cuda.is_bf16_supported(),
-        bf16=torch.cuda.is_bf16_supported(),
-        logging_steps=args.logging_steps,
-        seed=args.seed,
-        report_to="none",
-        save_strategy="steps",
-        save_steps=args.save_steps,
-        save_total_limit=args.save_total_limit,
-        group_by_length=True,
-        dataloader_num_workers=2,
-        load_best_model_at_end=(eval_dataset is not None),
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
-        eval_strategy="steps" if eval_dataset is not None else "no",
-        eval_steps=args.eval_steps if eval_dataset is not None else None,
-    )
+    # Build TrainingArguments with backward compatibility across transformers versions.
+    ta_kwargs = {
+        "output_dir": args.output_dir,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "num_train_epochs": args.num_train_epochs,
+        "learning_rate": args.learning_rate,
+        "warmup_ratio": args.warmup_ratio,
+        "weight_decay": args.weight_decay,
+        "lr_scheduler_type": "cosine",
+        "optim": "adamw_8bit",
+        "fp16": not torch.cuda.is_bf16_supported(),
+        "bf16": torch.cuda.is_bf16_supported(),
+        "logging_steps": args.logging_steps,
+        "seed": args.seed,
+        "report_to": "none",
+        "save_strategy": "steps",
+        "save_steps": args.save_steps,
+        "save_total_limit": args.save_total_limit,
+        "load_best_model_at_end": (eval_dataset is not None),
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
+        "eval_steps": args.eval_steps if eval_dataset is not None else None,
+    }
+
+    # transformers in some environments uses evaluation_strategy, not eval_strategy.
+    ta_signature = inspect.signature(TrainingArguments.__init__).parameters
+    if "eval_strategy" in ta_signature:
+        ta_kwargs["eval_strategy"] = "steps" if eval_dataset is not None else "no"
+    else:
+        ta_kwargs["evaluation_strategy"] = "steps" if eval_dataset is not None else "no"
+
+    if "group_by_length" in ta_signature:
+        ta_kwargs["group_by_length"] = True
+    if "dataloader_num_workers" in ta_signature:
+        ta_kwargs["dataloader_num_workers"] = 2
+
+    training_args = TrainingArguments(**ta_kwargs)
 
     callbacks = []
     if eval_dataset is not None:
