@@ -15,19 +15,24 @@ python sft_train_dialog.py \
 import argparse
 import os
 
+from unsloth import FastLanguageModel
 import pandas as pd
 import torch
 from datasets import Dataset
 from transformers import EarlyStoppingCallback, TrainingArguments
 from trl import SFTTrainer
-from unsloth import FastLanguageModel
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train dialogue-teacher LoRA with Unsloth + TRL")
 
+    # Backward-compatible positional args:
+    # python sft_train_dialog.py <csv_path> <output_dir>
+    parser.add_argument("csv_path_pos", nargs="?", default=None, help="(optional) positional csv path")
+    parser.add_argument("output_dir_pos", nargs="?", default=None, help="(optional) positional output dir")
+
     # Data
-    parser.add_argument("--csv-path", type=str, required=True, help="CSV with raw_text, ready_text, optional system")
+    parser.add_argument("--csv-path", type=str, default=None, help="CSV with raw_text, ready_text, optional system")
     parser.add_argument("--eval-split", type=float, default=0.03, help="Validation split fraction")
     parser.add_argument("--seed", type=int, default=3407)
 
@@ -43,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-dropout", type=float, default=0.1)
 
     # Training
-    parser.add_argument("--output-dir", type=str, required=True)
+    parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--num-train-epochs", type=float, default=2.0)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.05)
@@ -89,6 +94,24 @@ def to_chat_text(row: pd.Series, eos_token: str, has_system: bool, default_syste
 
 def main() -> None:
     args = build_parser().parse_args()
+    args.csv_path = args.csv_path or args.csv_path_pos
+    args.output_dir = args.output_dir or args.output_dir_pos
+
+    if not args.csv_path or not args.output_dir:
+        raise SystemExit(
+            "Provide dataset and output dir either as flags:\n"
+            "  --csv-path <path> --output-dir <path>\n"
+            "or as positional args:\n"
+            "  sft_train_dialog.py <csv_path> <output_dir>"
+        )
+
+    # Convenience fallback for common path typo: datasets/dialog_*.csv vs datasets/chats/dialog_*.csv
+    if not os.path.isfile(args.csv_path):
+        candidate = os.path.join("datasets", "chats", os.path.basename(args.csv_path))
+        if os.path.isfile(candidate):
+            print(f"CSV not found at '{args.csv_path}', using '{candidate}'")
+            args.csv_path = candidate
+
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("=== Loading model ===")
