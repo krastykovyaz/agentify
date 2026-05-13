@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--eval-steps", type=int, default=100)
-    parser.add_argument("--save-steps", type=int, default=25)
+    parser.add_argument("--save-steps", type=int, default=100)
     parser.add_argument("--save-total-limit", type=int, default=2)
     parser.add_argument("--early-stopping-patience", type=int, default=3)
     parser.add_argument(
@@ -190,6 +190,17 @@ def main() -> None:
 
     print("=== Building trainer ===")
     # Build TrainingArguments with backward compatibility across transformers versions.
+    # Some transformers versions require save_steps to be a round multiple of
+    # eval_steps when load_best_model_at_end=True.
+    if args.eval_split > 0 and args.eval_steps > 0 and args.save_steps > 0:
+        if args.save_steps % args.eval_steps != 0:
+            adjusted = args.eval_steps
+            print(
+                f"Adjusting save_steps from {args.save_steps} to {adjusted} "
+                "to satisfy load_best_model_at_end constraints."
+            )
+            args.save_steps = adjusted
+
     ta_kwargs = {
         "output_dir": args.output_dir,
         "per_device_train_batch_size": args.per_device_train_batch_size,
