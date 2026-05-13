@@ -15,9 +15,14 @@ python sft_train_dialog.py \
 import argparse
 import os
 from pathlib import Path
+import gc
+import subprocess
+import time
 
 from unsloth import FastLanguageModel
 import pandas as pd
+# Helps with CUDA memory fragmentation on supported PyTorch versions.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 from datasets import Dataset
 from transformers import EarlyStoppingCallback, TrainingArguments
@@ -70,6 +75,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Auto-resume from latest checkpoint in output-dir if available",
     )
     parser.add_argument("--no-resume", dest="resume", action="store_false")
+    parser.add_argument(
+        "--wait-on-oom",
+        action="store_true",
+        default=True,
+        help="On CUDA OOM: wait, then resume from latest checkpoint instead of crashing",
+    )
+    parser.add_argument("--no-wait-on-oom", dest="wait_on_oom", action="store_false")
+    parser.add_argument("--oom-wait-seconds", type=int, default=120)
+    parser.add_argument("--max-oom-retries", type=int, default=200)
+    parser.add_argument(
+        "--min-free-gpu-mb",
+        type=int,
+        default=2048,
+        help="Minimum free GPU memory required before (re)starting training",
+    )
 
     # Prompt style
     parser.add_argument(
@@ -256,21 +276,75 @@ def main() -> None:
         callbacks=callbacks,
     )
 
-    print("\n=== Training started ===\n")
-    resume_checkpoint = None
-    if args.resume:
+    def latest_checkpoint() -> str | None:
         ckpts = sorted(
             Path(args.output_dir).glob("checkpoint-*"),
             key=lambda p: int(p.name.split("-")[-1]) if p.name.split("-")[-1].isdigit() else -1,
         )
-        if ckpts:
-            resume_checkpoint = str(ckpts[-1])
+        return str(ckpts[-1]) if ckpts else None
+
+    def query_free_gpu_mb() -> int | None:
+        try:
+            out = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.free",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+            ).strip()
+            if not out:
+                return None
+            # GPU0 only
+            return int(out.splitlines()[0].strip())
+        except Exception:
+            return None
+
+    def wait_for_free_memory() -> None:
+        if not torch.cuda.is_available():
+            return
+        while True:
+            free_mb = query_free_gpu_mb()
+            if free_mb is None:
+                return
+            if free_mb >= args.min_free_gpu_mb:
+                return
+            print(
+                f"Waiting for GPU memory: free {free_mb} MiB < required {args.min_free_gpu_mb} MiB. "
+                f"Sleep {args.oom_wait_seconds}s..."
+            )
+            time.sleep(args.oom_wait_seconds)
+
+    print("\n=== Training started ===\n")
+    oom_retries = 0
+    while True:
+        if args.wait_on_oom:
+            wait_for_free_memory()
+
+        resume_checkpoint = latest_checkpoint() if args.resume else None
+        if resume_checkpoint:
             print(f"Resuming from checkpoint: {resume_checkpoint}")
 
-    if resume_checkpoint:
-        trainer.train(resume_from_checkpoint=resume_checkpoint)
-    else:
-        trainer.train()
+        try:
+            if resume_checkpoint:
+                trainer.train(resume_from_checkpoint=resume_checkpoint)
+            else:
+                trainer.train()
+            break
+        except torch.OutOfMemoryError:
+            if not args.wait_on_oom:
+                raise
+            oom_retries += 1
+            print(
+                f"CUDA OOM detected. Retry {oom_retries}/{args.max_oom_retries}. "
+                f"Sleeping {args.oom_wait_seconds}s, then resume..."
+            )
+            if oom_retries >= args.max_oom_retries:
+                raise
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            time.sleep(args.oom_wait_seconds)
 
     print("\n=== Saving adapter/tokenizer ===")
     model.save_pretrained(args.output_dir)
