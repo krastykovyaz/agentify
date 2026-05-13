@@ -14,6 +14,7 @@ python sft_train_dialog.py \
 
 import argparse
 import os
+from pathlib import Path
 
 from unsloth import FastLanguageModel
 import pandas as pd
@@ -59,9 +60,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--eval-steps", type=int, default=100)
-    parser.add_argument("--save-steps", type=int, default=100)
+    parser.add_argument("--save-steps", type=int, default=25)
     parser.add_argument("--save-total-limit", type=int, default=2)
     parser.add_argument("--early-stopping-patience", type=int, default=3)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=True,
+        help="Auto-resume from latest checkpoint in output-dir if available",
+    )
+    parser.add_argument("--no-resume", dest="resume", action="store_false")
 
     # Prompt style
     parser.add_argument(
@@ -238,7 +246,20 @@ def main() -> None:
     )
 
     print("\n=== Training started ===\n")
-    trainer.train()
+    resume_checkpoint = None
+    if args.resume:
+        ckpts = sorted(
+            Path(args.output_dir).glob("checkpoint-*"),
+            key=lambda p: int(p.name.split("-")[-1]) if p.name.split("-")[-1].isdigit() else -1,
+        )
+        if ckpts:
+            resume_checkpoint = str(ckpts[-1])
+            print(f"Resuming from checkpoint: {resume_checkpoint}")
+
+    if resume_checkpoint:
+        trainer.train(resume_from_checkpoint=resume_checkpoint)
+    else:
+        trainer.train()
 
     print("\n=== Saving adapter/tokenizer ===")
     model.save_pretrained(args.output_dir)
