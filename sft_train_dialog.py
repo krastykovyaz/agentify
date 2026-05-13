@@ -18,6 +18,7 @@ from pathlib import Path
 import gc
 import subprocess
 import time
+import re
 
 from unsloth import FastLanguageModel
 import pandas as pd
@@ -96,12 +97,44 @@ def build_parser() -> argparse.ArgumentParser:
         "--default-system",
         type=str,
         default=(
-            "Ты агент-учитель. Генерируй естественные, разнообразные и реалистичные ответы "
-            "в стиле диалога. Избегай шаблонности, сохраняй краткость и уместный тон."
+            "Ты эмпатичный собеседник. Отвечай только ОДНОЙ репликой ассистента, "
+            "кратко и по делу. Не пиши за пользователя и не продолжай диалог от обеих ролей."
         ),
     )
+    parser.add_argument("--min-ready-words", type=int, default=2, help="Drop too-short assistant replies")
+    parser.add_argument(
+        "--strip-multi-turn-in-ready",
+        action="store_true",
+        default=True,
+        help="Trim assistant target at role markers like 'Пользователь:'",
+    )
+    parser.add_argument("--no-strip-multi-turn-in-ready", dest="strip_multi_turn_in_ready", action="store_false")
 
     return parser
+
+
+def clean_ready_text(text: str, strip_multi_turn_in_ready: bool) -> str:
+    t = str(text).strip()
+    if strip_multi_turn_in_ready:
+        # Keep only first assistant reply if noisy multi-turn continuation leaked into target.
+        markers = [
+            r"\nПользователь:",
+            r"\nАссистент:",
+            r"<\|im_start\|>user",
+            r"<\|im_start\|>assistant",
+            r"\nuser:",
+            r"\nassistant:",
+        ]
+        cut_positions = []
+        for m in markers:
+            match = re.search(m, t, flags=re.IGNORECASE)
+            if match:
+                cut_positions.append(match.start())
+        if cut_positions:
+            t = t[: min(cut_positions)].strip()
+    # Remove accidental role prefix in target itself.
+    t = re.sub(r"^\s*(Ассистент|assistant)\s*:\s*", "", t, flags=re.IGNORECASE)
+    return t.strip()
 
 
 def to_chat_text(row: pd.Series, eos_token: str, has_system: bool, default_system: str) -> str:
@@ -185,6 +218,13 @@ def main() -> None:
 
     has_system = "system" in df.columns
     eos_token = tokenizer.eos_token
+
+    df["ready_text"] = df["ready_text"].apply(
+        lambda x: clean_ready_text(x, strip_multi_turn_in_ready=args.strip_multi_turn_in_ready)
+    )
+    df = df[df["ready_text"] != ""]
+    if args.min_ready_words > 0:
+        df = df[df["ready_text"].str.split().str.len() >= args.min_ready_words]
 
     df["text"] = df.apply(
         lambda row: to_chat_text(
