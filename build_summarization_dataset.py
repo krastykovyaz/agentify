@@ -23,6 +23,7 @@ from typing import List, Optional
 
 import requests
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 
 DEFAULT_SYSTEM = (
@@ -151,9 +152,13 @@ def main() -> None:
 
     samples = []
     skipped = 0
+
+    all_chunks = []
     for src in src_texts:
-        chunks = split_text(src, chunk_size=args.chunk_size, overlap=args.overlap)
-        for chunk in chunks:
+        all_chunks.extend(split_text(src, chunk_size=args.chunk_size, overlap=args.overlap))
+
+    progress = tqdm(all_chunks, desc="summarization-build", unit="chunk")
+    for chunk in progress:
             summary = summarize_chunk(
                 chunk=chunk,
                 system_prompt=args.system,
@@ -167,6 +172,7 @@ def main() -> None:
             )
             if summary is None:
                 skipped += 1
+                progress.set_postfix(ok=len(samples), skipped=skipped)
                 continue
             samples.append(
                 {
@@ -175,11 +181,10 @@ def main() -> None:
                     "system": args.system,
                 }
             )
+            progress.set_postfix(ok=len(samples), skipped=skipped)
             if args.max_samples > 0 and len(samples) >= args.max_samples:
                 break
             time.sleep(args.sleep)
-        if args.max_samples > 0 and len(samples) >= args.max_samples:
-            break
 
     # dedup
     uniq = {}
