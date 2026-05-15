@@ -357,6 +357,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=240)
     ap.add_argument("--sleep", type=float, default=0.2)
     ap.add_argument("--max-samples", type=int, default=0)
+    ap.add_argument("--llm-ratio", type=float, default=0.15, help="fraction of final rows produced via LLM")
+    ap.add_argument("--no-llm-for", default="", help="comma-separated domains without LLM generation")
     args = ap.parse_args()
 
     ollama_url = os.getenv("OLLAMA_URL", "http://10.6.33.8:11434/api/generate")
@@ -399,6 +401,7 @@ def main():
         raise SystemExit("No eligible source chunks")
 
     random.shuffle(pool)
+    no_llm_domains = {x.strip() for x in args.no_llm_for.split(",") if x.strip()}
 
     target_dist = parse_target_distribution(args.target_distribution)
     final_quota = {}
@@ -409,20 +412,53 @@ def main():
     out_rows = []
     out_dist = Counter()
     skipped = 0
+    llm_added = 0
+
+    total_target = args.max_samples if args.max_samples > 0 else len(pool)
+    llm_ratio = max(0.0, min(1.0, args.llm_ratio))
+    llm_target = int(total_target * llm_ratio)
+    reuse_target = max(0, total_target - llm_target)
+
+    # Stage 1: reuse-only rows (0 Ollama calls) to preserve real data.
+    for item in pool:
+        if len(out_rows) >= reuse_target:
+            break
+        dom = item["domain"]
+        if final_quota and dom in final_quota and out_dist[dom] >= final_quota[dom]:
+            continue
+        src_text = item["text"]
+        out_rows.append(
+            {
+                "raw_text": build_instruction(dom, "light", src_text),
+                "ready_text": src_text,
+                "system": SYSTEM_BY_DOMAIN[dom],
+                "domain": dom,
+                "mode": "reuse",
+                "source_file": item["source_file"],
+            }
+        )
+        out_dist[dom] += 1
 
     # conservative upper bound for progress bar
     total_jobs = len(pool) * len(modes)
     pbar = tqdm(total=total_jobs, desc="universal-augment", unit="job")
 
     for item in pool:
+        if llm_added >= llm_target:
+            break
         dom = item["domain"]
         if args.max_samples > 0 and len(out_rows) >= args.max_samples:
             break
         if final_quota and dom in final_quota and out_dist[dom] >= final_quota[dom]:
             pbar.update(len(modes))
             continue
+        if dom in no_llm_domains:
+            pbar.update(len(modes))
+            continue
 
         for mode in modes:
+            if llm_added >= llm_target:
+                break
             if args.max_samples > 0 and len(out_rows) >= args.max_samples:
                 break
             if final_quota and dom in final_quota and out_dist[dom] >= final_quota[dom]:
@@ -459,6 +495,7 @@ def main():
                     }
                 )
                 out_dist[dom] += 1
+                llm_added += 1
 
             pbar.update(1)
             pbar.set_postfix(ok=len(out_rows), skipped=skipped)
@@ -485,6 +522,10 @@ def main():
         "rows": len(out_rows),
         "skipped": skipped,
         "target_distribution": target_dist,
+        "llm_ratio_requested": llm_ratio,
+        "llm_rows": llm_added,
+        "reuse_rows": max(0, len(out_rows) - llm_added),
+        "no_llm_for": sorted(no_llm_domains),
     }
 
     report_path = Path(args.report) if args.report else output.with_suffix(".report.json")
