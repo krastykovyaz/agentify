@@ -2,10 +2,10 @@ venv
 .env
 *.log
 *.scv
-*.txt
 artifacts
 data
 *.cpp
 tmp.DS_Store
 .python-version
 __pycache__/
+unsloth_compiled_cache/
