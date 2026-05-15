@@ -21,6 +21,7 @@ import json
 import os
 import random
 import re
+import sqlite3
 import time
 from collections import Counter
 from pathlib import Path
@@ -193,15 +194,26 @@ def parse_source_spec(spec: str) -> List[Dict[str, str]]:
       path.csv:text_col:domain
       path.txt::domain
       path.csv:text_col:mixed
+      sqlite:/abs/path.db:sql=SELECT ...:domain
     """
     out = []
+    if spec.startswith("sqlite:"):
+        parts = spec.split(":", 3)
+        db_path = parts[1] if len(parts) > 1 else ""
+        sql_part = parts[2] if len(parts) > 2 else ""
+        domain = parts[3] if len(parts) > 3 else "mixed"
+        if sql_part.startswith("sql="):
+            sql_part = sql_part[4:]
+        out.append({"path": db_path, "col": "", "domain": domain or "mixed", "kind": "sqlite", "sql": sql_part})
+        return out
+
     parts = spec.split(":")
     if len(parts) == 1:
-        out.append({"path": parts[0], "col": "raw_text", "domain": "mixed"})
+        out.append({"path": parts[0], "col": "raw_text", "domain": "mixed", "kind": "file", "sql": ""})
     elif len(parts) == 2:
-        out.append({"path": parts[0], "col": parts[1] or "raw_text", "domain": "mixed"})
+        out.append({"path": parts[0], "col": parts[1] or "raw_text", "domain": "mixed", "kind": "file", "sql": ""})
     else:
-        out.append({"path": parts[0], "col": parts[1] or "raw_text", "domain": parts[2] or "mixed"})
+        out.append({"path": parts[0], "col": parts[1] or "raw_text", "domain": parts[2] or "mixed", "kind": "file", "sql": ""})
     return out
 
 
@@ -218,6 +230,25 @@ def load_texts(path: Path, text_col: str) -> List[str]:
                     rows.append(t)
         return rows
     return []
+
+
+def load_texts_sqlite(db_path: str, sql: str) -> List[str]:
+    if not db_path or not sql:
+        return []
+    con = sqlite3.connect(db_path)
+    try:
+        rows = con.execute(sql).fetchall()
+        out: List[str] = []
+        for row in rows:
+            if not row:
+                continue
+            # take first selected column as text payload
+            t = clean_text(str(row[0] or ""))
+            if t:
+                out.append(t)
+        return out
+    finally:
+        con.close()
 
 
 def parse_target_distribution(s: str) -> Dict[str, float]:
@@ -274,15 +305,20 @@ def main():
     src_dist = Counter()
 
     for spec in src_specs:
-        p = Path(spec["path"])
-        texts = load_texts(p, spec["col"])
+        if spec.get("kind") == "sqlite":
+            texts = load_texts_sqlite(spec["path"], spec.get("sql", ""))
+            src_name = f"sqlite:{spec['path']}"
+        else:
+            p = Path(spec["path"])
+            texts = load_texts(p, spec["col"])
+            src_name = str(p)
         for t in texts:
             for ch in split_chunks(t, args.chunk_size, args.overlap):
                 ch = clean_text(ch)
                 dom = spec["domain"] if spec["domain"] != "mixed" else infer_domain(ch)
                 rng = domain_ranges(dom)
                 if rng["src_min"] <= len(ch) <= rng["src_max"]:
-                    pool.append({"text": ch, "domain": dom, "source_file": str(p)})
+                    pool.append({"text": ch, "domain": dom, "source_file": src_name})
                     src_dist[dom] += 1
 
     if not pool:
