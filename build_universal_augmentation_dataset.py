@@ -82,6 +82,74 @@ def split_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
     return out
 
 
+def split_sentences(paragraph: str) -> List[str]:
+    parts = re.split(r"(?<=[.!?…])\s+", paragraph.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def smart_split_chunks(text: str, domain: str) -> List[str]:
+    text = clean_text(text)
+    if not text:
+        return []
+
+    cfg = {
+        "dialog": {"target": 700, "max": 900, "overlap_sent": 1},
+        "ads": {"target": 900, "max": 1200, "overlap_sent": 1},
+        "telegram": {"target": 1200, "max": 1600, "overlap_sent": 1},
+        "article": {"target": 1500, "max": 2200, "overlap_sent": 2},
+    }.get(domain, {"target": 1200, "max": 1600, "overlap_sent": 1})
+
+    paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+    if not paragraphs:
+        paragraphs = [text]
+
+    chunks: List[str] = []
+    current = ""
+    prev_tail_sentences: List[str] = []
+
+    def flush():
+        nonlocal current, prev_tail_sentences
+        c = clean_text(current)
+        if c:
+            chunks.append(c)
+            sents = split_sentences(c)
+            prev_tail_sentences = sents[-cfg["overlap_sent"] :] if sents else []
+        current = ""
+
+    for para in paragraphs:
+        candidate = (current + "\n\n" + para).strip() if current else para
+        if len(candidate) <= cfg["target"]:
+            current = candidate
+            continue
+
+        if current:
+            flush()
+            if prev_tail_sentences:
+                current = " ".join(prev_tail_sentences)
+
+        # if paragraph itself too large, split by sentences
+        if len(para) > cfg["max"]:
+            sent_buf = current.strip()
+            for s in split_sentences(para):
+                cand2 = (sent_buf + " " + s).strip() if sent_buf else s
+                if len(cand2) <= cfg["max"]:
+                    sent_buf = cand2
+                else:
+                    if sent_buf:
+                        chunks.append(clean_text(sent_buf))
+                        tail = split_sentences(sent_buf)
+                        sent_buf = " ".join(tail[-cfg["overlap_sent"] :]) if tail else ""
+                    sent_buf = (sent_buf + " " + s).strip() if sent_buf else s
+            current = sent_buf
+        else:
+            current = para
+
+    if current:
+        flush()
+
+    return [c for c in chunks if c]
+
+
 def infer_domain(text: str) -> str:
     low = text.lower()
     if ROLE_RE.search(text):
@@ -281,6 +349,7 @@ def main():
     ap.add_argument("--report", default="")
     ap.add_argument("--target-distribution", default="", help="telegram=0.3,ads=0.3,article=0.25,dialog=0.15")
     ap.add_argument("--modes", default="light,medium,deep")
+    ap.add_argument("--chunking", choices=["fixed", "smart"], default="smart")
     ap.add_argument("--chunk-size", type=int, default=1000)
     ap.add_argument("--overlap", type=int, default=120)
     ap.add_argument("--max-retries", type=int, default=4)
@@ -313,7 +382,12 @@ def main():
             texts = load_texts(p, spec["col"])
             src_name = str(p)
         for t in texts:
-            for ch in split_chunks(t, args.chunk_size, args.overlap):
+            base_domain = spec["domain"] if spec["domain"] != "mixed" else infer_domain(t)
+            if args.chunking == "smart":
+                text_chunks = smart_split_chunks(t, base_domain)
+            else:
+                text_chunks = split_chunks(t, args.chunk_size, args.overlap)
+            for ch in text_chunks:
                 ch = clean_text(ch)
                 dom = spec["domain"] if spec["domain"] != "mixed" else infer_domain(ch)
                 rng = domain_ranges(dom)
