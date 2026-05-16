@@ -27,7 +27,7 @@ import pandas as pd
 import torch
 from datasets import Dataset
 from dotenv import load_dotenv
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -205,6 +205,14 @@ def main() -> None:
         quantization_config=bnb_config,
         torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
     )
+
+    if args.use_4bit:
+        model = prepare_model_for_kbit_training(model)
+        # Ensure input embeddings require grad path for LoRA on quantized models.
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
 
     lora_cfg = LoraConfig(
         r=args.lora_r,
