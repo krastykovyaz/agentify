@@ -340,15 +340,21 @@ def main() -> None:
             eval_tok = eval_tok.remove_columns([c for c in eval_tok.column_names if c == "text"])
 
         data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-        trainer = Trainer(
-            model=model,
-            args=TrainingArguments(**ta_kwargs),
-            train_dataset=train_tok,
-            eval_dataset=eval_tok,
-            tokenizer=tokenizer,
-            data_collator=data_collator,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience)] if eval_tok is not None else [],
-        )
+        trainer_kwargs_tf = {
+            "model": model,
+            "args": TrainingArguments(**ta_kwargs),
+            "train_dataset": train_tok,
+            "eval_dataset": eval_tok,
+            "data_collator": data_collator,
+            "callbacks": [EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience)] if eval_tok is not None else [],
+        }
+        tr_sig = inspect.signature(Trainer.__init__).parameters
+        if "tokenizer" in tr_sig:
+            trainer_kwargs_tf["tokenizer"] = tokenizer
+        elif "processing_class" in tr_sig:
+            trainer_kwargs_tf["processing_class"] = tokenizer
+
+        trainer = Trainer(**trainer_kwargs_tf)
 
     print("=== Training ===")
     retries = 0
