@@ -33,6 +33,16 @@ from trl import SFTTrainer
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+GEMMA4_TARGET_MODULES = [
+    "q_proj.linear",
+    "k_proj.linear",
+    "v_proj.linear",
+    "o_proj.linear",
+    "gate_proj.linear",
+    "up_proj.linear",
+    "down_proj.linear",
+]
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train Gemma dialog LoRA")
@@ -194,9 +204,22 @@ def main() -> None:
         lora_dropout=args.lora_dropout,
         bias="none",
         task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        target_modules=GEMMA4_TARGET_MODULES,
     )
-    model = get_peft_model(model, lora_cfg)
+    try:
+        model = get_peft_model(model, lora_cfg)
+    except ValueError as e:
+        msg = str(e)
+        if "Gemma4ClippableLinear" in msg:
+            raise SystemExit(
+                "PEFT cannot inject LoRA into Gemma4 wrapper modules in your environment.\\n"
+                "Try one of these:\\n"
+                "1) upgrade peft/transformers/bitsandbytes\\n"
+                "2) run with --no-4bit\\n"
+                "3) keep this script and use a newer peft that supports Gemma4 path\\n"
+                f"Original error: {e}"
+            )
+        raise
 
     print("=== Loading/cleaning dataset ===")
     df = pd.read_csv(args.csv_path)
