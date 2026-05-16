@@ -28,7 +28,15 @@ import torch
 from datasets import Dataset
 from dotenv import load_dotenv
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, EarlyStoppingCallback, TrainingArguments
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    DataCollatorForLanguageModeling,
+    EarlyStoppingCallback,
+    Trainer,
+    TrainingArguments,
+)
 from trl import SFTTrainer
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -307,7 +315,40 @@ def main() -> None:
 
     # If neither dataset_text_field nor formatting_func is supported, keep dataset with "text" column;
     # newer/older TRL versions may infer defaults.
-    trainer = SFTTrainer(**filtered_kwargs)
+    trainer = None
+    try:
+        trainer = SFTTrainer(**filtered_kwargs)
+    except KeyError as e:
+        if "push_to_hub_token" not in str(e):
+            raise
+        print("SFTTrainer compatibility issue detected (push_to_hub_token). Falling back to transformers.Trainer.")
+
+        def tok_fn(batch):
+            return tokenizer(
+                batch["text"],
+                truncation=True,
+                max_length=args.max_seq_length,
+                padding=False,
+            )
+
+        train_tok = train_ds.map(tok_fn, batched=True, remove_columns=[c for c in train_ds.column_names if c != "text"])
+        train_tok = train_tok.remove_columns([c for c in train_tok.column_names if c == "text"])
+
+        eval_tok = None
+        if eval_ds is not None:
+            eval_tok = eval_ds.map(tok_fn, batched=True, remove_columns=[c for c in eval_ds.column_names if c != "text"])
+            eval_tok = eval_tok.remove_columns([c for c in eval_tok.column_names if c == "text"])
+
+        data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+        trainer = Trainer(
+            model=model,
+            args=TrainingArguments(**ta_kwargs),
+            train_dataset=train_tok,
+            eval_dataset=eval_tok,
+            tokenizer=tokenizer,
+            data_collator=data_collator,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience)] if eval_tok is not None else [],
+        )
 
     print("=== Training ===")
     retries = 0
