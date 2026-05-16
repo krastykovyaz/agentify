@@ -284,17 +284,27 @@ def main() -> None:
     if "dataloader_num_workers" in sig:
         ta_kwargs["dataloader_num_workers"] = 2
 
-    trainer = SFTTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=train_ds,
-        eval_dataset=eval_ds,
-        dataset_text_field="text",
-        max_seq_length=args.max_seq_length,
-        packing=False,
-        args=TrainingArguments(**ta_kwargs),
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience)] if eval_ds is not None else [],
-    )
+    trainer_kwargs = {
+        "model": model,
+        "train_dataset": train_ds,
+        "eval_dataset": eval_ds,
+        "dataset_text_field": "text",
+        "max_seq_length": args.max_seq_length,
+        "packing": False,
+        "args": TrainingArguments(**ta_kwargs),
+        "callbacks": [EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience)] if eval_ds is not None else [],
+    }
+
+    # TRL compatibility:
+    # - older versions use `tokenizer=...`
+    # - newer versions switched to `processing_class=...`
+    try:
+        trainer = SFTTrainer(tokenizer=tokenizer, **trainer_kwargs)
+    except TypeError as e:
+        if "unexpected keyword argument 'tokenizer'" in str(e):
+            trainer = SFTTrainer(processing_class=tokenizer, **trainer_kwargs)
+        else:
+            raise
 
     print("=== Training ===")
     retries = 0
