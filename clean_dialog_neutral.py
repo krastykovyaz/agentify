@@ -233,6 +233,8 @@ def main() -> None:
     ap.add_argument("--min-words", type=int, default=3)
     ap.add_argument("--max-chars", type=int, default=260)
     ap.add_argument("--rewrite-flagged", action="store_true", default=False)
+    ap.add_argument("--max-samples", type=int, default=0, help="0 = process all rows")
+    ap.add_argument("--offset", type=int, default=0, help="Skip first N rows before processing")
     ap.add_argument("--max-retries", type=int, default=3)
     ap.add_argument("--timeout", type=int, default=180)
     ap.add_argument("--temperature", type=float, default=0.35)
@@ -243,6 +245,10 @@ def main() -> None:
 
     with Path(args.input).open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
+    if args.offset > 0:
+        rows = rows[args.offset :]
+    if args.max_samples > 0:
+        rows = rows[: args.max_samples]
 
     cleaned, stats = process_rows(
         rows=rows,
