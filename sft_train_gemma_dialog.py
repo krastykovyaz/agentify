@@ -295,16 +295,19 @@ def main() -> None:
         "callbacks": [EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience)] if eval_ds is not None else [],
     }
 
-    # TRL compatibility:
-    # - older versions use `tokenizer=...`
-    # - newer versions switched to `processing_class=...`
-    try:
-        trainer = SFTTrainer(tokenizer=tokenizer, **trainer_kwargs)
-    except TypeError as e:
-        if "unexpected keyword argument 'tokenizer'" in str(e):
-            trainer = SFTTrainer(processing_class=tokenizer, **trainer_kwargs)
-        else:
-            raise
+    # TRL compatibility across versions:
+    # pass only kwargs supported by current SFTTrainer signature.
+    sft_sig = inspect.signature(SFTTrainer.__init__).parameters
+    filtered_kwargs = {k: v for k, v in trainer_kwargs.items() if k in sft_sig}
+
+    if "tokenizer" in sft_sig:
+        filtered_kwargs["tokenizer"] = tokenizer
+    elif "processing_class" in sft_sig:
+        filtered_kwargs["processing_class"] = tokenizer
+
+    # If neither dataset_text_field nor formatting_func is supported, keep dataset with "text" column;
+    # newer/older TRL versions may infer defaults.
+    trainer = SFTTrainer(**filtered_kwargs)
 
     print("=== Training ===")
     retries = 0
