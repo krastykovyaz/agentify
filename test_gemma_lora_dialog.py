@@ -60,11 +60,11 @@ def main():
     ]
 
     for i, t in enumerate(tests, 1):
-        prompt = (
-            f"<|im_start|>system\n{args.system}<|im_end|>\n"
-            f"<|im_start|>user\n{t}<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
+        messages = [
+            {"role": "system", "content": args.system},
+            {"role": "user", "content": t},
+        ]
+        prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         ids = tok(prompt, return_tensors="pt").to(model.device)
 
         with torch.no_grad():
