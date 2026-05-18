@@ -66,9 +66,14 @@ def hf_answer(base_model, lora_path, task):
     return ans
 
 
-def gguf_answer(gguf_path, task):
+def gguf_answer(gguf_path, task, n_gpu_layers=0):
     text = SAMPLES[task][0]
-    prompt = f"[system] Ты полезный ассистент.\n[user] [{task}] {INSTR[task]}\\n\\n{text}\\n[assistant]"
+    prompt = (
+        f"Задача: {task}\n"
+        f"Инструкция: {INSTR[task]}\n\n"
+        f"Вход:\n{text}\n\n"
+        "Ответ:\n"
+    )
     cmd = [
         "./llama.cpp/build/bin/llama-cli",
         "-m", gguf_path,
@@ -77,12 +82,13 @@ def gguf_answer(gguf_path, task):
         "--temp", "0.4",
         "--top-p", "0.85",
         "--repeat-penalty", "1.1",
-        "-ngl", "99",
+        "-ngl", str(n_gpu_layers),
+        "--no-cnv",
         "--no-display-prompt",
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        raise RuntimeError(r.stderr)
+        raise RuntimeError((r.stderr or "") + "\n" + (r.stdout or ""))
     return r.stdout.strip()
 
 
@@ -92,11 +98,12 @@ def main():
     ap.add_argument("--base-model", required=True)
     ap.add_argument("--lora-path", required=True)
     ap.add_argument("--gguf-path", required=True)
+    ap.add_argument("--n-gpu-layers", type=int, default=0)
     ap.add_argument("--json-out", default="")
     args = ap.parse_args()
 
     ref = hf_answer(args.base_model, args.lora_path, args.task)
-    gg = gguf_answer(args.gguf_path, args.task)
+    gg = gguf_answer(args.gguf_path, args.task, n_gpu_layers=args.n_gpu_layers)
 
     score = SequenceMatcher(None, ref, gg).ratio()
     payload = {"task": args.task, "score": score, "reference": ref, "gguf": gg}
