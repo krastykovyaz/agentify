@@ -88,16 +88,20 @@ def gguf_answer(gguf_path, task, n_gpu_layers=0):
         base_cmd.extend(["-ngl", str(n_gpu_layers)])
 
     # Some llama-cli builds auto-enter conversation mode for chat models.
-    # Try one-shot mode first, then fallback. Always use timeout to avoid hanging.
+    # Try multiple one-shot/disable-conversation flag variants.
     variants = [
+        base_cmd + ["-st"],
         base_cmd + ["--single-turn"],
+        base_cmd + ["-no-cnv"],
+        base_cmd + ["--no-conversation"],
         base_cmd,
     ]
 
     last_err = None
     for cmd in variants:
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            # Send /exit as a safety net if binary still enters interactive mode.
+            r = subprocess.run(cmd, input="/exit\n", capture_output=True, text=True, timeout=120)
             if r.returncode == 0:
                 return r.stdout.strip()
             last_err = (r.stderr or "") + "\n" + (r.stdout or "")
