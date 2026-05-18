@@ -74,7 +74,7 @@ def gguf_answer(gguf_path, task, n_gpu_layers=0):
         f"Вход:\n{text}\n\n"
         "Ответ:\n"
     )
-    cmd = [
+    base_cmd = [
         "./llama.cpp/build/bin/llama-cli",
         "-m", gguf_path,
         "-p", prompt,
@@ -85,11 +85,25 @@ def gguf_answer(gguf_path, task, n_gpu_layers=0):
         "--no-display-prompt",
     ]
     if n_gpu_layers and n_gpu_layers > 0:
-        cmd.extend(["-ngl", str(n_gpu_layers)])
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError((r.stderr or "") + "\n" + (r.stdout or ""))
-    return r.stdout.strip()
+        base_cmd.extend(["-ngl", str(n_gpu_layers)])
+
+    # Some llama-cli builds auto-enter conversation mode for chat models.
+    # Try one-shot mode first, then fallback. Always use timeout to avoid hanging.
+    variants = [
+        base_cmd + ["--single-turn"],
+        base_cmd,
+    ]
+
+    last_err = None
+    for cmd in variants:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            if r.returncode == 0:
+                return r.stdout.strip()
+            last_err = (r.stderr or "") + "\n" + (r.stdout or "")
+        except subprocess.TimeoutExpired:
+            last_err = "llama-cli timed out (likely interactive wait)."
+    raise RuntimeError(last_err or "llama-cli failed")
 
 
 def main():
