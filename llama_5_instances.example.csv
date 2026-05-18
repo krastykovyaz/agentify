@@ -1,0 +1,6 @@
+name,port,gguf_path,ctx,predict,gpu_layers,temp,top_p
+gemma_summarization_q4,8081,/home/aleksandr.koviazin/kovyaz/agentify/artifacts/models_gemma_summarization-Q4_K_M.gguf,2048,220,0,0.2,0.9
+gemma_telegram_q4,8082,/home/aleksandr.koviazin/kovyaz/agentify/artifacts/models_gemma_telegram_post_v1-Q4_K_M.gguf,3072,260,0,0.25,0.9
+gemma_universal_q4,8083,/home/aleksandr.koviazin/kovyaz/agentify/artifacts/models_universal_gemma_v1-Q4_K_M.gguf,3072,240,0,0.2,0.9
+gemma_extraction_q4,8084,/home/aleksandr.koviazin/kovyaz/agentify/artifacts/models_gemma_extraction_v1-Q4_K_M.gguf,3072,260,0,0.15,0.85
+gemma_dialog_q4,8085,/home/aleksandr.koviazin/kovyaz/agentify/artifacts/models_gemma_ak_dialog-Q4_K_M.gguf,2048,180,0,0.45,0.85

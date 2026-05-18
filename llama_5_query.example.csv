@@ -1,0 +1,6 @@
+name,port,task,base_url
+gemma_summarization_q4,8081,summarization,
+gemma_telegram_q4,8082,telegram_post,
+gemma_universal_q4,8083,qa,
+gemma_extraction_q4,8084,extraction,
+gemma_dialog_q4,8085,dialog,
