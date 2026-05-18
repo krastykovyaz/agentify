@@ -82,10 +82,10 @@ def gguf_answer(gguf_path, task, n_gpu_layers=0):
         "--temp", "0.4",
         "--top-p", "0.85",
         "--repeat-penalty", "1.1",
-        "-ngl", str(n_gpu_layers),
-        "--no-cnv",
         "--no-display-prompt",
     ]
+    if n_gpu_layers and n_gpu_layers > 0:
+        cmd.extend(["-ngl", str(n_gpu_layers)])
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or "") + "\n" + (r.stdout or ""))
