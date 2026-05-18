@@ -49,13 +49,13 @@ def parse_args():
 
 def compile_patterns():
     bad_markers = re.compile(r"(?i)\\b(todo|lorem ipsum|coming soon|n/?a|placeholder|fixme|tbd)\\b")
-    code_hint = re.compile(
-        r"```|\\bdef\\s+|\\bclass\\s+|#include|\\bSELECT\\b|\\bINSERT\\b|\\bUPDATE\\b|\\bDELETE\\b|"
-        r"\\bpublic\\s+class\\b|\\bfunction\\s+|\\bimport\\s+|\\bfrom\\s+|\\bconst\\s+|\\blet\\s+|"
-        r"\\btry\\s*\\{|\\bcatch\\s*\\(|\\bif\\s*\\(|\\bfor\\s*\\(|\\bwhile\\s*\\(|"
-        r"\\breturn\\b|=>|::|\\{\\s*$",
-        flags=re.IGNORECASE,
-    )
+    # Simple/robust marker list to avoid regex parser edge-cases across versions.
+    code_tokens = [
+        "```", "def ", "class ", "#include", "SELECT ", "INSERT ", "UPDATE ", "DELETE ",
+        "public class", "function ", "import ", "from ", "const ", "let ",
+        "try {", "catch (", "if (", "for (", "while (", "return", "=>", "::",
+    ]
+    code_hint = re.compile("|".join(re.escape(t) for t in code_tokens), flags=re.IGNORECASE)
     return bad_markers, code_hint
 
 
