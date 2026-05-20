@@ -137,7 +137,8 @@ def main():
     ap.add_argument("--max-new-tokens", type=int, default=2200)
     ap.add_argument("--temperature", type=float, default=0.2)
     ap.add_argument("--top-p", type=float, default=0.9)
-    ap.add_argument("--do-sample", action="store_true", default=True)
+    ap.add_argument("--do-sample", action="store_true", default=False)
+    ap.add_argument("--summary-json", default="")
     args = ap.parse_args()
 
     tok = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
@@ -160,17 +161,18 @@ def main():
         ids = tok(prompt, return_tensors="pt").to(model.device)
 
         t0 = time.time()
+        gen_kwargs = {
+            "max_new_tokens": args.max_new_tokens,
+            "do_sample": args.do_sample,
+            "repetition_penalty": 1.05,
+            "eos_token_id": tok.eos_token_id,
+            "pad_token_id": tok.eos_token_id,
+        }
+        if args.do_sample:
+            gen_kwargs["temperature"] = args.temperature
+            gen_kwargs["top_p"] = args.top_p
         with torch.no_grad():
-            out = model.generate(
-                **ids,
-                max_new_tokens=args.max_new_tokens,
-                temperature=args.temperature,
-                top_p=args.top_p,
-                do_sample=args.do_sample,
-                repetition_penalty=1.05,
-                eos_token_id=tok.eos_token_id,
-                pad_token_id=tok.eos_token_id,
-            )
+            out = model.generate(**ids, **gen_kwargs)
         dt = time.time() - t0
 
         text = tok.decode(out[0][ids["input_ids"].shape[1]:], skip_special_tokens=True).strip()
@@ -209,6 +211,28 @@ def main():
     passed = sum(1 for r in rows if r["ok"] == 1)
     fmt = sum(1 for r in rows if r["format_ok"] == 1)
     avg = round(sum(r["score"] for r in rows) / total, 2) if total else 0
+    fail_ids = [r["case_id"] for r in rows if r["ok"] == 0]
+
+    summary = {
+        "total": total,
+        "passed": passed,
+        "format_ok": fmt,
+        "avg_score": avg,
+        "failed_cases": fail_ids,
+        "params": {
+            "base_model": args.base_model,
+            "lora_path": args.lora_path,
+            "max_new_tokens": args.max_new_tokens,
+            "do_sample": args.do_sample,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+        },
+    }
+    if args.summary_json:
+        sp = Path(args.summary_json)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"saved summary: {sp}")
 
     print(f"saved json: {out_json}")
     print(f"saved csv:  {out_csv}")
