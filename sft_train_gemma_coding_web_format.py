@@ -417,8 +417,8 @@ def main():
 
     # small optional balancing: if EN prompts are used, ensure some EN-like user instructions exist
     if args.force_user_lang_match:
-        en_mask = df["instruction"].astype(str).apply(looks_english)
-        en_count = int(en_mask.sum())
+        en_mask = df["instruction"].astype(str).apply(lambda x: bool(looks_english(x))).astype(bool)
+        en_count = int(en_mask.astype("int64").sum())
         if en_count == 0 and args.en_ratio > 0:
             print("Warning: no EN user instructions found; EN prompt will still be sampled by en-ratio.")
 
