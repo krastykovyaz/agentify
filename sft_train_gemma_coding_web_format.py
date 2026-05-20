@@ -422,14 +422,17 @@ def main():
         if en_count == 0 and args.en_ratio > 0:
             print("Warning: no EN user instructions found; EN prompt will still be sampled by en-ratio.")
 
-    df["text"] = df.apply(
-        lambda r: tokenizer.apply_chat_template(
-            build_messages(r, system_prompt_ru, system_prompt_en, rng, args.en_ratio, args.force_user_lang_match),
+    texts = []
+    for row in df.to_dict(orient="records"):
+        txt = tokenizer.apply_chat_template(
+            build_messages(row, system_prompt_ru, system_prompt_en, rng, args.en_ratio, args.force_user_lang_match),
             tokenize=False,
             add_generation_prompt=False,
-        ),
-        axis=1,
-    )
+        )
+        if not isinstance(txt, str):
+            txt = str(txt)
+        texts.append(txt)
+    df["text"] = texts
 
     ds = Dataset.from_pandas(df[["text"]], preserve_index=False)
     if args.eval_split > 0:
