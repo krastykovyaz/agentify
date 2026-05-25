@@ -29,6 +29,7 @@ import requests
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -154,8 +155,11 @@ def split_text(text: str, limit: int = 3900):
 
 
 def ollama_chat(base_url: str, model: str, system: str, user_text: str, timeout: int = 300) -> str:
-    url = base_url.rstrip("/") + "/api/chat"
-    payload = {
+    base = base_url.rstrip("/")
+
+    # 1) Native Ollama API
+    url_chat = base + "/api/chat"
+    payload_chat = {
         "model": model,
         "stream": False,
         "messages": [
@@ -168,10 +172,59 @@ def ollama_chat(base_url: str, model: str, system: str, user_text: str, timeout:
             "num_ctx": 8192,
         },
     }
-    r = requests.post(url, json=payload, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
-    return (data.get("message") or {}).get("content", "").strip()
+    r = requests.post(url_chat, json=payload_chat, timeout=timeout)
+    if r.status_code < 400:
+        data = r.json()
+        return (data.get("message") or {}).get("content", "").strip()
+
+    # 2) OpenAI-compatible chat endpoint
+    url_oai_chat = base + "/v1/chat/completions"
+    payload_oai_chat = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_text},
+        ],
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 1200,
+    }
+    r2 = requests.post(url_oai_chat, json=payload_oai_chat, timeout=timeout)
+    if r2.status_code < 400:
+        data = r2.json()
+        choices = data.get("choices") or []
+        if choices:
+            msg = choices[0].get("message") or {}
+            if isinstance(msg, dict):
+                return str(msg.get("content", "")).strip()
+        return ""
+
+    # 3) OpenAI-compatible completions endpoint
+    url_oai_comp = base + "/v1/completions"
+    prompt = f"System: {system}\n\nUser: {user_text}\nAssistant:"
+    payload_oai_comp = {
+        "model": model,
+        "prompt": prompt,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 1200,
+    }
+    r3 = requests.post(url_oai_comp, json=payload_oai_comp, timeout=timeout)
+    if r3.status_code < 400:
+        data = r3.json()
+        choices = data.get("choices") or []
+        if choices:
+            return str(choices[0].get("text", "")).strip()
+        return ""
+
+    # If all failed, report compact diagnostics.
+    msg = (
+        f"All backends failed for {base_url}\n"
+        f"/api/chat -> {r.status_code}: {r.text[:300]}\n"
+        f"/v1/chat/completions -> {r2.status_code}: {r2.text[:300]}\n"
+        f"/v1/completions -> {r3.status_code}: {r3.text[:300]}"
+    )
+    raise requests.HTTPError(msg)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,7 +250,12 @@ async def cmd_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agents: Dict[str, AgentCfg] = context.application.bot_data["agents"]
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest as e:
+        msg = str(e).lower()
+        if "query is too old" not in msg and "query id is invalid" not in msg:
+            raise
 
     data = query.data or ""
     if not data.startswith("agent:"):
