@@ -129,13 +129,15 @@ def keyboard(agents: Dict[str, AgentCfg]) -> InlineKeyboardMarkup:
 
 
 def get_selected_agent(context: ContextTypes.DEFAULT_TYPE, chat_id: int, agents: Dict[str, AgentCfg]) -> AgentCfg:
-    chat_data = context.application.chat_data.setdefault(chat_id, {})
+    _ = chat_id  # chat_id kept for signature compatibility
+    chat_data = context.chat_data
     key = chat_data.get("agent_key", "universal")
     return agents.get(key, agents["universal"])
 
 
 def set_selected_agent(context: ContextTypes.DEFAULT_TYPE, chat_id: int, key: str) -> None:
-    chat_data = context.application.chat_data.setdefault(chat_id, {})
+    _ = chat_id  # chat_id kept for signature compatibility
+    chat_data = context.chat_data
     chat_data["agent_key"] = key
 
 
@@ -261,6 +263,10 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled telegram error: %s", context.error)
+
+
 def main():
     load_dotenv()
     token = os.getenv("TG_BOT_TOKEN", "").strip()
@@ -279,6 +285,7 @@ def main():
     app.add_handler(CommandHandler("models", cmd_models))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^agent:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_error_handler(on_error)
 
     logger.info("Bot started. Ollama: %s", ollama_base_url)
     app.run_polling(close_loop=False)
