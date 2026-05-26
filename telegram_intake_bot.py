@@ -8,6 +8,7 @@ import os
 import re
 import asyncio
 import subprocess
+import shlex
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ logger = logging.getLogger("telegram_intake_bot")
 TARGET = 1000
 AGENT_STYLES = ["summary", "qa", "extraction", "dialogue", "telegram", "universal"]
 STYLE_MODEL = os.getenv("OLLAMA_MODEL_UNIVERSAL", "agentify-universal-q4_k_m")
+QA_MODEL = os.getenv("OLLAMA_MODEL_QA", "agentify:qa_q3_k")
 
 
 def norm(s: str) -> str:
@@ -48,6 +50,42 @@ def infer_style(text: str) -> str:
     if len(t) > 600:
         return "summary"
     return "universal"
+
+
+def ask_qa_style_ratio(base_url: str, texts: List[str]) -> dict | None:
+    sample = "\n\n---\n\n".join(texts[:40])
+    system = (
+        "Определи доли стилей для датасета. Верни только JSON-объект с ключами "
+        "summary, qa, extraction, dialogue, telegram, universal. "
+        "Значения — доли от 0 до 1, сумма должна быть 1."
+    )
+    user = f"Тексты выборки:\n{sample}"
+    payload = {
+        "model": QA_MODEL,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "options": {"temperature": 0.0, "top_p": 0.9, "num_ctx": 8192},
+    }
+    try:
+        r = requests.post(base_url.rstrip("/") + "/api/chat", json=payload, timeout=180)
+        r.raise_for_status()
+        out = (r.json().get("message") or {}).get("content", "").strip()
+        m = re.search(r"\{.*\}", out, flags=re.DOTALL)
+        if not m:
+            return None
+        obj = json.loads(m.group(0))
+        vals = {}
+        for k in AGENT_STYLES:
+            vals[k] = max(0.0, float(obj.get(k, 0.0)))
+        s = sum(vals.values())
+        if s <= 0:
+            return None
+        return {k: vals[k] / s for k in AGENT_STYLES}
+    except Exception:
+        return None
 
 
 def infer_style_via_universal_raw(base_url: str, text: str) -> str | None:
@@ -129,7 +167,7 @@ def read_texts(path: Path) -> List[str]:
     return []
 
 
-def build_report(texts: List[str], styles: List[str], agree_n: int, agent_failed_n: int) -> str:
+def build_report(texts: List[str], styles: List[str], qa_ratio: dict | None, agree_n: int, agent_failed_n: int) -> str:
     n = len(texts)
     if n == 0:
         return "Не нашел валидных текстов в файле. Поддерживаются csv/json/txt."
@@ -159,9 +197,14 @@ def build_report(texts: List[str], styles: List[str], agree_n: int, agent_failed
         need = TARGET - n
         lines.append("")
         lines.append(f"Данных недостаточно: нужно добрать {need} примеров до {TARGET}.")
-        # proportional recommendation: fill weaker styles first
-        weights = {k: 1.0/(dist.get(k,0)+1) for k in AGENT_STYLES}
-        s = sum(weights.values())
+        # Recommended ratios: prefer QA-agent output, fallback to inverse rarity.
+        if qa_ratio:
+            weights = qa_ratio
+        else:
+            inv = {k: 1.0 / (dist.get(k, 0) + 1) for k in AGENT_STYLES}
+            s_inv = sum(inv.values())
+            weights = {k: inv[k] / s_inv for k in AGENT_STYLES}
+        s = sum(weights.values()) or 1.0
         lines.append("Рекомендованная пропорция добора по стилям:")
         for k in AGENT_STYLES:
             p = weights[k]/s
@@ -231,6 +274,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         styles = []
         agree_n = 0
         agent_failed_n = 0
+        qa_ratio = ask_qa_style_ratio(base_url, texts)
         # classify all texts; universal agent is source of truth on mismatch.
         for t in texts:
             final_style, agent_style, heuristic_style, agreed = classify_style_with_consensus(base_url, t)
@@ -240,7 +284,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 agree_n += 1
             if agent_style == "failed":
                 agent_failed_n += 1
-        report = build_report(texts, styles, agree_n, agent_failed_n)
+        report = build_report(texts, styles, qa_ratio, agree_n, agent_failed_n)
 
         context.chat_data["flow"] = {
             "input_file": str(local_path),
