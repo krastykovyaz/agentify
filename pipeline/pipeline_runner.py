@@ -107,6 +107,36 @@ def call_ollama(base_url: str, model: str, system: str, user_text: str, timeout:
     return normalize_text((r.json().get("message") or {}).get("content", ""))
 
 
+def ask_qa_ratio(cfg: dict, rows: List[dict]) -> Dict[str, float] | None:
+    agents = cfg["agents"]
+    qa = agents.get("qa")
+    if not qa:
+        return None
+    sample = [r["input"] for r in rows[:40] if r.get("input")]
+    if not sample:
+        return None
+    sys = (
+        "Определи доли стилей для добора датасета. Верни только JSON с ключами "
+        "summary, qa, extraction, dialogue, telegram, universal. "
+        "Значения 0..1, сумма 1."
+    )
+    user = "\\n\\n---\\n\\n".join(sample)
+    try:
+        out = call_ollama(cfg["ollama_base_url"], qa["model"], sys, user, timeout=180)
+        m = re.search(r"\\{.*\\}", out, flags=re.DOTALL)
+        if not m:
+            return None
+        obj = json.loads(m.group(0))
+        keys = ["summary", "qa", "extraction", "dialogue", "telegram", "universal"]
+        vals = {k: max(0.0, float(obj.get(k, 0.0))) for k in keys}
+        s = sum(vals.values())
+        if s <= 0:
+            return None
+        return {k: vals[k] / s for k in keys}
+    except Exception:
+        return None
+
+
 def make_train_row(text: str, task: str, wrapper_prompt: str) -> dict:
     instruction = {
         "summary": "Сделай краткое резюме исходного текста.",
@@ -156,7 +186,11 @@ def augment_to_target(rows: List[dict], cfg: dict, target: int, seed: int) -> Li
 
     counts = Counter(r["task"] for r in rows)
     tasks = ["summary", "qa", "extraction", "dialogue", "telegram", "universal"]
-    min_count = min((counts.get(t, 0) for t in tasks), default=0)
+    ratio = ask_qa_ratio(cfg, rows)
+    if ratio is None:
+        inv = {t: 1.0 / (counts.get(t, 0) + 1) for t in tasks}
+        s_inv = sum(inv.values())
+        ratio = {t: inv[t] / s_inv for t in tasks}
 
     synth_limit = int(target * float(cfg.get("synthetic_max_ratio", 0.35)))
     synth_added = 0
@@ -165,9 +199,20 @@ def augment_to_target(rows: List[dict], cfg: dict, target: int, seed: int) -> Li
     if not seeds:
         return rows
 
+    need_total = max(0, target - len(rows))
+    desired_add = {t: int(round(need_total * ratio.get(t, 0.0))) for t in tasks}
+    # rounding fix
+    delta = need_total - sum(desired_add.values())
+    if delta != 0:
+        best = max(tasks, key=lambda x: ratio.get(x, 0.0))
+        desired_add[best] += delta
+
     while len(rows) < target and synth_added < synth_limit:
-        # pick underrepresented task first
-        t = min(tasks, key=lambda x: counts.get(x, 0))
+        # pick task with largest remaining deficit in desired_add
+        remaining = {t: desired_add.get(t, 0) for t in tasks}
+        t = max(tasks, key=lambda x: remaining.get(x, 0))
+        if remaining.get(t, 0) <= 0:
+            break
         a = agents[t]
         system = load_prompt(a["prompt_file"])
         model = a["model"]
@@ -198,6 +243,7 @@ def augment_to_target(rows: List[dict], cfg: dict, target: int, seed: int) -> Li
         }
         rows.append(row)
         counts[t] += 1
+        desired_add[t] = max(0, desired_add[t] - 1)
         synth_added += 1
 
     return rows
