@@ -83,9 +83,41 @@ build_one() {
 
   local ollama_name="${OLLAMA_NS}:${label,,}_${quant,,}"
   local modelfile="${ARTIFACTS_DIR}/modelfiles/${label}_${quant}.Modelfile"
+  local system_prompt=""
+
+  case "${label}" in
+    summary)
+      system_prompt='Краткое резюме ситуации. Сразу короткий текст по исходному тексту. Без вводных слов и без пояснений.'
+      ;;
+    extraction)
+      system_prompt='Извлекай структурированные поля и возвращай строго JSON-строку. Без префикса "json", без markdown, без пояснений, только валидный JSON.'
+      ;;
+    telegram)
+      system_prompt='Сформируй готовый пост для Telegram-канала по исходному тексту. Верни только один финальный пост без вариантов, рекомендаций и саммари.'
+      ;;
+    dialogue)
+      system_prompt='Ты добрый и харизматичный собеседник. Отвечай бережно, уместно, поддерживающе и по-человечески.'
+      ;;
+    coding_web)
+      system_prompt='Ты ИИ-ассистент для создания веб-приложений. Выдавай только код/скрипты без лишних пояснений. По умолчанию HTML+CSS+JS и FastAPI, минимальные изменения, качество выше скорости.'
+      ;;
+    universal)
+      system_prompt='Универсальный ассистент: для постов выдавай один финальный текст без вариантов; для summary сразу кратко по сути; для extraction только валидный JSON-строкой; для coding только рабочий код без лишних пояснений.'
+      ;;
+    qa)
+      system_prompt='Отвечай по фактам кратко и точно.'
+      ;;
+    validator)
+      system_prompt='Проверяй качество, находи ошибки и риски, давай четкие замечания.'
+      ;;
+    *)
+      system_prompt='Ты полезный ассистент.'
+      ;;
+  esac
 
   cat > "${modelfile}" <<EOF
 FROM ${gguf_path}
+SYSTEM ${system_prompt}
 PARAMETER temperature 0.2
 PARAMETER top_p 0.9
 PARAMETER num_ctx 8192
