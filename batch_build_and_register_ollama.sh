@@ -46,7 +46,7 @@ validator|models_gemma_validator_v1|Q3_K
 dialogue|models_gemma_ak_dialog|Q4_K_M
 telegram|models_gemma_telegram_post_v1|Q4_K_M
 universal|models_universal_gemma_v1|Q4_K_M
-coding_web|models_gemma_coding_web_format_v2|Q4_K_M
+coding_web|models_gemma_coding_v2|Q4_K_M
 EOF
 )
 

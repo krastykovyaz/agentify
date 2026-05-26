@@ -10,7 +10,7 @@ Optional model overrides:
   OLLAMA_MODEL_SUMMARY=agentify:summary_q3_k
   OLLAMA_MODEL_QA=agentify:qa_q3_k
   OLLAMA_MODEL_EXTRACTION=agentify:extraction_q3_k
-  OLLAMA_MODEL_VALIDATOR=agentify:validator_q3_k
+#   OLLAMA_MODEL_VALIDATOR=agentify:validator_q3_k
   OLLAMA_MODEL_DIALOGUE=agentify:dialogue_q4_k_m
   OLLAMA_MODEL_TELEGRAM=agentify:telegram_q4_k_m
   OLLAMA_MODEL_UNIVERSAL=agentify:universal_q4_k_m
@@ -82,12 +82,12 @@ def build_agents() -> Dict[str, AgentCfg]:
                 "Без префикса 'json', без markdown, без пояснений, только валидный JSON."
             ),
         ),
-        "validator": AgentCfg(
-            key="validator",
-            title="Validator (Q3)",
-            model=_env("OLLAMA_MODEL_VALIDATOR", "agentify:validator_q3_k"),
-            system="Проверяй качество, находи ошибки и риски, давай четкие замечания.",
-        ),
+        # "validator": AgentCfg(
+        #     key="validator",
+        #     title="Validator (Q3)",
+        #     model=_env("OLLAMA_MODEL_VALIDATOR", "agentify:validator_q3_k"),
+        #     system="Проверяй качество, находи ошибки и риски, давай четкие замечания.",
+        # ),
         "dialogue": AgentCfg(
             key="dialogue",
             title="Dialogue (Q4)",
@@ -192,7 +192,7 @@ def build_agents() -> Dict[str, AgentCfg]:
 def keyboard(agents: Dict[str, AgentCfg]) -> InlineKeyboardMarkup:
     rows = []
     order = [
-        "summary", "qa", "extraction", "validator",
+        "summary", "qa", "extraction", # "validator",
         "dialogue", "telegram", "universal", "coding_web",
     ]
     for i in range(0, len(order), 2):
@@ -389,7 +389,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agents: Dict[str, AgentCfg] = context.application.bot_data["agents"]
     lines = ["Доступные агенты:"]
-    for k in ["summary", "qa", "extraction", "validator", "dialogue", "telegram", "universal", "coding_web"]:
+    for k in ["summary", "qa", "extraction", "dialogue", "telegram", "universal", "coding_web"]: # , "validator"
         a = agents[k]
         lines.append(f"- {a.title}: `{a.model}`")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
