@@ -9,6 +9,7 @@ import re
 import asyncio
 import subprocess
 import shlex
+import uuid
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("telegram_intake_bot")
 
-TARGET = 1000
+TARGET = int(os.getenv("DATASET_TARGET_LIMIT", "1000"))
 AGENT_STYLES = ["summary", "qa", "extraction", "dialogue", "telegram", "universal"]
 STYLE_MODEL = os.getenv("OLLAMA_MODEL_UNIVERSAL", "agentify-universal-q4_k_m")
 QA_MODEL = os.getenv("OLLAMA_MODEL_QA", "agentify:qa_q3_k")
@@ -234,6 +235,34 @@ async def run_cmd(cmd: list[str], cwd: Path) -> tuple[int, str]:
     return proc.returncode, txt[:3500]
 
 
+def free_disk_gb(path: Path) -> float:
+    st = os.statvfs(str(path))
+    return (st.f_bavail * st.f_frsize) / (1024**3)
+
+
+def free_gpu_mb() -> int | None:
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"], text=True
+        ).strip()
+        vals = [int(x.strip()) for x in out.splitlines() if x.strip().isdigit()]
+        return vals[0] if vals else None
+    except Exception:
+        return None
+
+
+def resource_check(root: Path) -> tuple[bool, str]:
+    min_disk = float(os.getenv("TRAIN_MIN_FREE_DISK_GB", "30"))
+    min_gpu = int(os.getenv("TRAIN_MIN_FREE_GPU_MB", "12000"))
+    d = free_disk_gb(root)
+    g = free_gpu_mb()
+    if d < min_disk:
+        return False, f"disk {d:.1f}GB < {min_disk}GB"
+    if g is not None and g < min_gpu:
+        return False, f"gpu_free {g}MB < {min_gpu}MB"
+    return True, f"disk {d:.1f}GB, gpu_free {g if g is not None else 'n/a'}MB"
+
+
 def allowed_file(name: str) -> bool:
     return Path(name or "").suffix.lower() in {".csv", ".json", ".txt"}
 
@@ -380,17 +409,41 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         outdir = run_dir / "model_out"
         cmd = train_cmd.replace("{DATASET}", str(ds_csv)).replace("{OUTDIR}", str(outdir))
-        code, log = await run_cmd(shlex.split(cmd), root)
-        if code != 0:
-            await q.message.reply_text(f"Обучение завершилось с ошибкой:\n{log}")
+        ok, why = resource_check(root)
+        if ok:
+            await q.message.reply_text(f"Ресурсы достаточны, запускаю сразу ({why})")
+            code, log = await run_cmd(shlex.split(cmd), root)
+            if code != 0:
+                await q.message.reply_text(f"Обучение завершилось с ошибкой:\n{log}")
+                return
+            hf_link = os.getenv("PIPELINE_LAST_HF_LINK", "").strip() or "(ссылка не указана)"
+            test_hint = os.getenv("PIPELINE_TEST_HINT", "Отправь тестовый запрос в этого же бота.")
+            await q.message.reply_text(
+                "Готово!\n"
+                f"Ссылка на агента: {hf_link}\n"
+                f"Тестировать можно здесь: {test_hint}"
+            )
             return
 
-        hf_link = os.getenv("PIPELINE_LAST_HF_LINK", "").strip() or "(ссылка не указана)"
-        test_hint = os.getenv("PIPELINE_TEST_HINT", "Отправь тестовый запрос в этого же бота.")
+        # queue when not enough resources
+        qdir = root / "queue" / "train"
+        qdir.mkdir(parents=True, exist_ok=True)
+        job = {
+            "id": str(uuid.uuid4()),
+            "chat_id": q.message.chat_id,
+            "cmd": cmd,
+            "dataset": str(ds_csv),
+            "outdir": str(outdir),
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "retries": 0,
+        }
+        jf = qdir / f"{flow['run_id']}_{job['id'][:8]}.json"
+        jf.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
         await q.message.reply_text(
-            "Готово!\n"
-            f"Ссылка на агента: {hf_link}\n"
-            f"Тестировать можно здесь: {test_hint}"
+            "Ресурсов сейчас недостаточно. Задача поставлена в очередь.\n"
+            f"Причина: {why}\n"
+            f"Файл очереди: {jf.name}\n"
+            "Как только ресурсы освободятся, воркер автоматически запустит обучение и пришлет уведомление."
         )
         return
 
