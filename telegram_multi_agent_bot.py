@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
+import os, re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict
@@ -39,6 +39,8 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+import re
+
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -179,6 +181,15 @@ def split_text(text: str, limit: int = 3900):
     if text:
         yield text
 
+def telegram_postprocess(text: str) -> str:
+    text = text.replace("###", "•")
+    text = text.replace("**", "")
+    text = text.replace("__", "")
+    text = text.replace("```", "")
+    text = text.replace("$", "")
+    # collapse empty lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 def ollama_chat(base_url: str, model: str, system: str, user_text: str, timeout: int = 300) -> str:
     base = base_url.rstrip("/")
@@ -267,10 +278,13 @@ async def cmd_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agents: Dict[str, AgentCfg] = context.application.bot_data["agents"]
     chat_id = update.effective_chat.id
     current = get_selected_agent(context, chat_id, agents)
+    safe_text = telegram_escape(ch)
     await update.message.reply_text(
         f"Текущий агент: {current.title}\nМодель: {current.model}",
         reply_markup=keyboard(agents),
+        parse_mode="MarkdownV2",
     )
+    
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -341,7 +355,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chunks = [header + "(пустой ответ)"]
 
     for ch in chunks:
-        await update.message.reply_text(ch)
+        await update.message.reply_text(telegram_postprocess(ch))
 
 
 async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -350,7 +364,7 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for k in ["summary", "qa", "extraction", "dialogue", "telegram", "universal", "coding_web"]: # , "validator"
         a = agents[k]
         lines.append(f"- {a.title}: `{a.model}`")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
