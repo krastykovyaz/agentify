@@ -5,27 +5,27 @@ ollama_base_url: http://127.0.0.1:11434
 
 agents:
   summary:
-    model: agentify-summary-q3_k
+    model: agentify:summary_q3_k
     prompt_file: /home/aleksandr.koviazin/kovyaz/agentify/prompts/p_summary.txt
     weight_when_missing: 1.2
   qa:
-    model: agentify-qa-q3_k
+    model: agentify:qa_q3_k
     prompt_file: /home/aleksandr.koviazin/kovyaz/agentify/prompts/p_qa.txt
     weight_when_missing: 1.1
   extraction:
-    model: agentify-extraction-q3_k
+    model: agentify:extraction_q3_k
     prompt_file: /home/aleksandr.koviazin/kovyaz/agentify/prompts/p_extraction.txt
     weight_when_missing: 1.3
   dialogue:
-    model: agentify-dialogue-q4_k_m
+    model: agentify:dialogue_q4_k_m
     prompt_file: /home/aleksandr.koviazin/kovyaz/agentify/prompts/p_dialogue.txt
     weight_when_missing: 1.0
   telegram:
-    model: agentify-telegram-q4_k_m
+    model: agentify:telegram_q4_k_m
     prompt_file: /home/aleksandr.koviazin/kovyaz/agentify/prompts/p_telegram.txt
     weight_when_missing: 1.2
   universal:
-    model: agentify-universal-q4_k_m
+    model: agentify:universal_q4_k_m
     prompt_file: /home/aleksandr.koviazin/kovyaz/agentify/prompts/p_universal.txt
     weight_when_missing: 1.0
 
