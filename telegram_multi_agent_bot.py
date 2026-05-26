@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict
 
 import requests
@@ -59,7 +60,23 @@ def _env(name: str, default: str) -> str:
     return v if v else default
 
 
+def load_coding_web_prompt() -> str:
+    env_path = os.getenv("CODING_WEB_SYSTEM_PROMPT_FILE", "").strip()
+    candidates = []
+    if env_path:
+        candidates.append(Path(env_path))
+    here = Path(__file__).resolve().parent
+    candidates.append(here / "prompts_coding_web_system.txt")
+    for p in candidates:
+        if p.exists():
+            txt = p.read_text(encoding="utf-8").strip()
+            if txt:
+                return txt
+    return "Ты ИИ-ассистент для создания веб-приложений. Выдавай только код."
+
+
 def build_agents() -> Dict[str, AgentCfg]:
+    coding_system = load_coding_web_prompt()
     return {
         "summary": AgentCfg(
             key="summary",
@@ -119,72 +136,7 @@ def build_agents() -> Dict[str, AgentCfg]:
             key="coding_web",
             title="Coding Web (Q4)",
             model=_env("OLLAMA_MODEL_CODING_WEB", "agentify:coding_web_q4_k_m"),
-            system="""Ты — ИИ-ассистент для создания веб-приложений. Ты можешь взаимодействовать с компьютером: писать код, запускать команды, исправлять ошибки.
-
-<РОЛЬ>
-* Помогай пользователям создавать приложения: пиши код, запускай команды, чини баги.
-* Если пользователь задаёт вопрос — отвечай на него, не пытайся сразу что-то менять в коде.
-* Общайся на русском языке, если пользователь пишет по-русски.
-* Отдавай приоритет качеству, а не скорости.
-</РОЛЬ>
-
-<ЭФФЕКТИВНОСТЬ>
-* Каждое действие имеет стоимость. Объединяй несколько команд в одну где возможно.
-* Для исследования кода используй find, grep, git — избегай лишних операций.
-</ЭФФЕКТИВНОСТЬ>
-
-<ФАЙЛОВАЯ_СИСТЕМА>
-* Не предполагай расположение файлов — сначала найди через find/ls.
-* Редактируй файлы напрямую, не создавай копии с суффиксами (_v2, _fix, _new).
-* Не создавай документацию к своим изменениям без явной просьбы.
-</ФАЙЛОВАЯ_СИСТЕМА>
-
-<КАЧЕСТВО_КОДА>
-* Минималистичный чистый код. Комментарии только там где код неочевиден.
-* Минимально необходимые изменения для решения задачи.
-* Все импорты в начале файла.
-</КАЧЕСТВО_КОДА>
-
-<СТЕК_ПО_УМОЛЧАНИЮ>
-* Frontend: HTML + CSS, js
-* Backend: FastAPI + Python 3.12
-* БД: SQLite для MVP, PostgreSQL для продакшна
-* Деплой: Docker + docker-compose
-* Платежи: ЮKassa / Robokassa
-* Auth: Telegram Login или email/password (JWT)
-* Старайся избегать React + Vite если явно не просят
-</СТЕК_ПО_УМОЛЧАНИЮ>
-
-<HTML_CSS_PROJECTS>
-* Для HTML проектов: create index.html with embedded CSS in <style> tags
-* CSS должен быть внутри HTML файл в <style> tags — не создавай отдельный css файл если явно не просят
-* This ensures styles always load correctly in preview
-* Пример структуры:
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <style>
-      /* All CSS here */
-    </style>
-  </head>
-  <body>...</body>
-  </html>
-</HTML_CSS_PROJECTS>
-
-<РЕШЕНИЕ_ПРОБЛЕМ>
-1. ИССЛЕДОВАНИЕ: изучи файлы и контекст перед тем как предлагать решение
-2. АНАЛИЗ: рассмотри несколько подходов, выбери оптимальный
-3. РЕАЛИЗАЦИЯ: минимальные изменения, всегда редактируй оригинальный файл
-4. ПРОВЕРКА: убедись что решение работает
-
-* Если несколько попыток не дали результата — перечисли 3-5 возможных причин, начни с наиболее вероятной.
-* При серьёзной проблеме предложи новый план и подтверди с пользователем.
-</РЕШЕНИЕ_ПРОБЛЕМ>
-
-<БЕЗОПАСНОСТЬ>
-* Не выполняй опасные операции (удаление репозиториев, push в main) без явного подтверждения.
-* Не загружай API ключи и секреты никуда кроме соответствующих сервисов.
-</БЕЗОПАСНОСТЬ>""",
+            system=coding_system,
         ),
     }
 
@@ -357,6 +309,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     cfg = get_selected_agent(context, chat_id, agents)
     user_text = update.message.text
+    if cfg.key == "coding_web":
+        user_text = (
+            "Верни результат как чистый текст кода/скрипта для сохранения в файл и запуска. "
+            "Не используй markdown-блоки, не добавляй пояснения.\n\n"
+            f"{user_text}"
+        )
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
