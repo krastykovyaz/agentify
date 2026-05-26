@@ -50,7 +50,7 @@ def infer_style(text: str) -> str:
     return "universal"
 
 
-def infer_style_via_universal(base_url: str, text: str) -> str:
+def infer_style_via_universal_raw(base_url: str, text: str) -> str | None:
     sys = (
         "Классифицируй текст строго в один стиль: summary|qa|extraction|dialogue|telegram|universal. "
         "Верни только одно слово из списка."
@@ -73,7 +73,25 @@ def infer_style_via_universal(base_url: str, text: str) -> str:
                 return s
     except Exception:
         pass
-    return infer_style(text)
+    return None
+
+
+def classify_style_with_consensus(base_url: str, text: str) -> tuple[str, str, str, bool]:
+    """
+    Returns:
+      final_style, agent_style, heuristic_style, agreed
+    Rules:
+      - if agent and heuristic agree -> use that
+      - if disagree -> use agent
+      - if agent failed -> use heuristic
+    """
+    heuristic = infer_style(text)
+    agent = infer_style_via_universal_raw(base_url, text)
+    if agent is None:
+        return heuristic, "failed", heuristic, False
+    if agent == heuristic:
+        return agent, agent, heuristic, True
+    return agent, agent, heuristic, False
 
 
 def read_texts(path: Path) -> List[str]:
@@ -111,7 +129,7 @@ def read_texts(path: Path) -> List[str]:
     return []
 
 
-def build_report(texts: List[str], styles: List[str]) -> str:
+def build_report(texts: List[str], styles: List[str], agree_n: int, agent_failed_n: int) -> str:
     n = len(texts)
     if n == 0:
         return "Не нашел валидных текстов в файле. Поддерживаются csv/json/txt."
@@ -127,6 +145,9 @@ def build_report(texts: List[str], styles: List[str]) -> str:
     lines.append(f"Средняя длина: {int(sum(lens)/len(lens))} символов")
     lines.append(f"P95 длины: {sorted(lens)[int(0.95*(len(lens)-1))]}")
     lines.append(f"Доминирующий стиль: {dominant} ({dominant_share:.0%})")
+    if n > 0:
+        lines.append(f"Сходимость агент/эвристика: {agree_n}/{n} ({agree_n*100/n:.0f}%)")
+        lines.append(f"Фолбэк на эвристики (агент не сработал): {agent_failed_n}")
     lines.append("Распределение по стилям:")
     for k in AGENT_STYLES:
         lines.append(f"- {k}: {dist.get(k,0)}")
@@ -207,12 +228,19 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         texts = read_texts(local_path)
         base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-        # universal-style detection (with fallback) on full set up to 1000 items
-        styles = [infer_style_via_universal(base_url, t) for t in texts[:1000]]
-        if len(texts) > 1000:
-            # extend remaining using heuristic for speed
-            styles.extend(infer_style(t) for t in texts[1000:])
-        report = build_report(texts, styles)
+        styles = []
+        agree_n = 0
+        agent_failed_n = 0
+        # classify all texts; universal agent is source of truth on mismatch.
+        for t in texts:
+            final_style, agent_style, heuristic_style, agreed = classify_style_with_consensus(base_url, t)
+            _ = heuristic_style
+            styles.append(final_style)
+            if agreed:
+                agree_n += 1
+            if agent_style == "failed":
+                agent_failed_n += 1
+        report = build_report(texts, styles, agree_n, agent_failed_n)
 
         context.chat_data["flow"] = {
             "input_file": str(local_path),
@@ -262,7 +290,29 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if code != 0:
             await q.message.reply_text(f"Подготовка завершилась с ошибкой:\n{log}")
             return
-        await q.message.reply_text("Подготовка датасета завершена. Запускаем обучение?", reply_markup=decision_keyboard("train"))
+        msg = "Подготовка датасета завершена."
+        try:
+            rep = json.loads(ds_report.read_text(encoding="utf-8"))
+            orig = int(rep.get("original_rows", 0))
+            final = int(rep.get("final_rows", 0))
+            src_dist = rep.get("source_distribution", {}) or {}
+            synth = 0
+            for k, v in src_dist.items():
+                if str(k).startswith("synthetic:"):
+                    synth += int(v)
+            target = int(rep.get("target", 1000))
+            status = "достигнут" if final >= target else "НЕ достигнут"
+            msg = (
+                f"Подготовка датасета завершена.\n"
+                f"- Было real: {orig}\n"
+                f"- Стало всего: {final}\n"
+                f"- Добавлено synthetic: {synth}\n"
+                f"- Target {target}: {status}"
+            )
+        except Exception:
+            pass
+        await q.message.reply_text(msg)
+        await q.message.reply_text("Запускаем обучение?", reply_markup=decision_keyboard("train"))
         return
 
     if step == "train":
