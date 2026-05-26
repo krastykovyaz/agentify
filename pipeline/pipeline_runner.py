@@ -282,7 +282,12 @@ def main():
     args = ap.parse_args()
 
     cfg = read_yaml_like(Path(args.config))
-    target = int(cfg.get("target_samples", 1000))
+    env_target = os.getenv("DATASET_TARGET_LIMIT", "").strip()
+    target = int(env_target) if env_target else int(cfg.get("target_samples", 1000))
+
+    env_synth = os.getenv("SYNTHETIC_MAX_RATIO", "").strip()
+    if env_synth:
+        cfg["synthetic_max_ratio"] = float(env_synth)
     seed = int(cfg.get("random_seed", 42))
     wrapper_prompt = load_prompt(cfg.get("final_wrapper_prompt_file", ""))
 
