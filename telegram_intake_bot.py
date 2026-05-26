@@ -6,14 +6,17 @@ import json
 import logging
 import os
 import re
+import asyncio
+import subprocess
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import List
 
+import requests
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -23,6 +26,7 @@ logger = logging.getLogger("telegram_intake_bot")
 
 TARGET = 1000
 AGENT_STYLES = ["summary", "qa", "extraction", "dialogue", "telegram", "universal"]
+STYLE_MODEL = os.getenv("OLLAMA_MODEL_UNIVERSAL", "agentify-universal-q4_k_m")
 
 
 def norm(s: str) -> str:
@@ -44,6 +48,32 @@ def infer_style(text: str) -> str:
     if len(t) > 600:
         return "summary"
     return "universal"
+
+
+def infer_style_via_universal(base_url: str, text: str) -> str:
+    sys = (
+        "Классифицируй текст строго в один стиль: summary|qa|extraction|dialogue|telegram|universal. "
+        "Верни только одно слово из списка."
+    )
+    payload = {
+        "model": STYLE_MODEL,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": sys},
+            {"role": "user", "content": text[:3000]},
+        ],
+        "options": {"temperature": 0.0, "top_p": 0.9, "num_ctx": 4096},
+    }
+    try:
+        r = requests.post(base_url.rstrip("/") + "/api/chat", json=payload, timeout=60)
+        r.raise_for_status()
+        out = (r.json().get("message") or {}).get("content", "").strip().lower()
+        for s in AGENT_STYLES:
+            if s in out:
+                return s
+    except Exception:
+        pass
+    return infer_style(text)
 
 
 def read_texts(path: Path) -> List[str]:
@@ -81,13 +111,12 @@ def read_texts(path: Path) -> List[str]:
     return []
 
 
-def build_report(texts: List[str]) -> str:
+def build_report(texts: List[str], styles: List[str]) -> str:
     n = len(texts)
     if n == 0:
         return "Не нашел валидных текстов в файле. Поддерживаются csv/json/txt."
 
     lens = [len(t) for t in texts]
-    styles = [infer_style(t) for t in texts]
     dist = Counter(styles)
 
     dominant = dist.most_common(1)[0][0]
@@ -120,13 +149,34 @@ def build_report(texts: List[str]) -> str:
     return "\n".join(lines)
 
 
+def decision_keyboard(step: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("Да", callback_data=f"flow:{step}:yes"),
+            InlineKeyboardButton("Нет", callback_data=f"flow:{step}:no"),
+        ]]
+    )
+
+
+async def run_cmd(cmd: list[str], cwd: Path) -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=str(cwd),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await proc.communicate()
+    txt = (out.decode("utf-8", errors="ignore") + "\n" + err.decode("utf-8", errors="ignore")).strip()
+    return proc.returncode, txt[:3500]
+
+
 def allowed_file(name: str) -> bool:
     return Path(name or "").suffix.lower() in {".csv", ".json", ".txt"}
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Отправь файл с текстами (csv/json/txt). Я проанализирую объем, стиль и скажу, достаточно ли данных для обучения на 1000 примеров."
+        "Отправь файл с текстами (csv/json/txt). Дальше пойдем пошагово: анализ -> подготовка датасета -> обучение -> финальный ответ со ссылкой."
     )
 
 
@@ -156,11 +206,99 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         texts = read_texts(local_path)
-        report = build_report(texts)
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+        # universal-style detection (with fallback) on full set up to 1000 items
+        styles = [infer_style_via_universal(base_url, t) for t in texts[:1000]]
+        if len(texts) > 1000:
+            # extend remaining using heuristic for speed
+            styles.extend(infer_style(t) for t in texts[1000:])
+        report = build_report(texts, styles)
+
+        context.chat_data["flow"] = {
+            "input_file": str(local_path),
+            "input_name": local_name,
+            "run_id": datetime.utcnow().strftime("%Y%m%d_%H%M%S"),
+        }
     except Exception as e:
         report = f"Ошибка обработки файла: {e}"
+        context.chat_data.pop("flow", None)
 
     await update.message.reply_text(report)
+    if context.chat_data.get("flow"):
+        await update.message.reply_text("Запускаем подготовку датасета?", reply_markup=decision_keyboard("prepare"))
+
+
+async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data or ""
+    if not data.startswith("flow:"):
+        return
+    _, step, decision = data.split(":", 2)
+
+    flow = context.chat_data.get("flow")
+    if not flow:
+        await q.edit_message_text("Нет активной сессии. Отправь файл заново.")
+        return
+
+    root = Path(os.getenv("AGENTIFY_ROOT", "/home/aleksandr.koviazin/kovyaz/agentify")).resolve()
+    run_dir = root / "runs" / flow["run_id"]
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ds_csv = run_dir / "pipeline_train_1000.csv"
+    ds_report = run_dir / "pipeline_train_1000.report.json"
+
+    if step == "prepare":
+        if decision == "no":
+            await q.edit_message_text("Ок, остановились на этапе анализа.")
+            return
+        await q.edit_message_text("Запускаю подготовку датасета...")
+        code, log = await run_cmd([
+            "python3", str(root / "pipeline" / "pipeline_runner.py"),
+            "--input", flow["input_file"],
+            "--config", str(root / "pipeline" / "pipeline_config.yaml"),
+            "--output-csv", str(ds_csv),
+            "--report-json", str(ds_report),
+        ], root)
+        if code != 0:
+            await q.message.reply_text(f"Подготовка завершилась с ошибкой:\n{log}")
+            return
+        await q.message.reply_text("Подготовка датасета завершена. Запускаем обучение?", reply_markup=decision_keyboard("train"))
+        return
+
+    if step == "train":
+        if decision == "no":
+            await q.edit_message_text("Ок, датасет готов. Обучение не запускал.")
+            if ds_csv.exists():
+                await q.message.reply_document(document=ds_csv.open("rb"), filename=ds_csv.name)
+            if ds_report.exists():
+                await q.message.reply_document(document=ds_report.open("rb"), filename=ds_report.name)
+            return
+        await q.edit_message_text("Запускаю обучение... Это может занять время.")
+
+        # Training command is configurable; keep simple default
+        train_cmd = os.getenv("PIPELINE_TRAIN_CMD", "").strip()
+        if not train_cmd:
+            await q.message.reply_text(
+                "Не задан PIPELINE_TRAIN_CMD. Укажи команду обучения в .env, например:\n"
+                "PIPELINE_TRAIN_CMD=python3 /home/aleksandr.koviazin/kovyaz/agentify/sft_train_gemma_universal.py --csv-path {DATASET} --output-dir {OUTDIR}"
+            )
+            return
+
+        outdir = run_dir / "model_out"
+        cmd = train_cmd.replace("{DATASET}", str(ds_csv)).replace("{OUTDIR}", str(outdir))
+        code, log = await run_cmd(shlex.split(cmd), root)
+        if code != 0:
+            await q.message.reply_text(f"Обучение завершилось с ошибкой:\n{log}")
+            return
+
+        hf_link = os.getenv("PIPELINE_LAST_HF_LINK", "").strip() or "(ссылка не указана)"
+        test_hint = os.getenv("PIPELINE_TEST_HINT", "Отправь тестовый запрос в этого же бота.")
+        await q.message.reply_text(
+            "Готово!\n"
+            f"Ссылка на агента: {hf_link}\n"
+            f"Тестировать можно здесь: {test_hint}"
+        )
+        return
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -175,6 +313,7 @@ def main():
 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CallbackQueryHandler(on_flow_button, pattern=r"^flow:"))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
