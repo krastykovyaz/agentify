@@ -273,6 +273,14 @@ def materialize_outputs(rows: List[dict], cfg: dict) -> List[dict]:
     return out_rows
 
 
+def to_raw_text(row: dict) -> str:
+    instruction = normalize_text(str(row.get("instruction", "")))
+    inp = normalize_text(str(row.get("input", "")))
+    if instruction and inp:
+        return f"{instruction}\n\nИсходный текст:\n{inp}"
+    return instruction or inp
+
+
 def main():
     load_dotenv()
     ap = argparse.ArgumentParser(description="Dataset pipeline: normalize + trim/augment to 1000")
@@ -309,12 +317,24 @@ def main():
     # write csv
     out_csv = Path(args.output_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["task", "instruction", "input", "output", "source", "system"]
+    fields = [
+        "raw_text",
+        "ready_text",
+        "system",
+        "task",
+        "instruction",
+        "input",
+        "output",
+        "source",
+    ]
     with out_csv.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for r in rows:
-            w.writerow({k: r.get(k, "") for k in fields})
+            out = {k: r.get(k, "") for k in fields}
+            out["raw_text"] = to_raw_text(r)
+            out["ready_text"] = normalize_text(str(r.get("output", "")))
+            w.writerow(out)
 
     report = {
         "input": args.input,
