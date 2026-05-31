@@ -7,6 +7,7 @@ import csv
 import json
 import random
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List
@@ -90,6 +91,10 @@ def read_input_rows(path: Path) -> List[str]:
                     out.append(t)
         return out
     raise SystemExit(f"Unsupported input extension: {ext}")
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
 
 
 def call_ollama(base_url: str, model: str, system: str, user_text: str, timeout: int = 180) -> str:
@@ -254,18 +259,27 @@ def materialize_outputs(rows: List[dict], cfg: dict) -> List[dict]:
     base_url = cfg["ollama_base_url"]
     agents = cfg["agents"]
     out_rows = []
-    for r in rows:
+    total = len(rows)
+    for idx, r in enumerate(rows, start=1):
         if r.get("output"):
             out_rows.append(r)
             continue
         task = r["task"]
         a = agents.get(task, agents["universal"])
         system = load_prompt(a["prompt_file"])
+        log(f"[materialize] {idx}/{total} task={task} model={a['model']}")
         try:
-            out = call_ollama(base_url, a["model"], system, r["input"])
+            out = call_ollama(
+                base_url,
+                a["model"],
+                system,
+                r["input"],
+                timeout=int(os.getenv("OLLAMA_CALL_TIMEOUT_SEC", "180")),
+            )
         except Exception:
             out = ""
         if not out:
+            log(f"[materialize] skipped {idx}/{total} task={task} empty response")
             continue
         rr = dict(r)
         rr["output"] = out
@@ -301,17 +315,22 @@ def main():
     wrapper_prompt = load_prompt(cfg.get("final_wrapper_prompt_file", ""))
 
     texts = read_input_rows(Path(args.input))
+    log(f"[stage] loaded texts={len(texts)}")
     rows = [make_train_row(t, infer_task(t), wrapper_prompt) for t in texts]
 
     original_n = len(rows)
+    log(f"[stage] initial rows={original_n} target={target}")
     if original_n > target:
+        log("[stage] trimming to target")
         rows = stratified_trim(rows, target, seed)
 
+    log("[stage] augmenting/materializing")
     rows = augment_to_target(rows, cfg, target, seed)
     rows = materialize_outputs(rows, cfg)
 
     # final trim if over target
     if len(rows) > target:
+        log("[stage] final trim")
         rows = stratified_trim(rows, target, seed)
 
     # write csv
@@ -349,6 +368,7 @@ def main():
     out_report.parent.mkdir(parents=True, exist_ok=True)
     out_report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    log(f"[done] final_rows={len(rows)}")
     print(f"saved dataset: {out_csv}")
     print(f"saved report:  {out_report}")
     print(f"rows: {len(rows)}")
