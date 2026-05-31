@@ -235,6 +235,35 @@ async def run_cmd(cmd: list[str], cwd: Path) -> tuple[int, str]:
     return proc.returncode, txt[:3500]
 
 
+async def publish_to_hf(root: Path, run_id: str, outdir: Path, dataset: Path, report: Path) -> tuple[bool, str]:
+    script = root / "pipeline" / "publish_run_to_hf.py"
+    if not script.exists():
+        return False, f"publish script not found: {script}"
+    code, log = await run_cmd(
+        [
+            "python3",
+            str(script),
+            "--outdir",
+            str(outdir),
+            "--run-id",
+            run_id,
+            "--dataset",
+            str(dataset),
+            "--report",
+            str(report),
+        ],
+        root,
+    )
+    if code != 0:
+        return False, log
+    link = ""
+    for line in reversed(log.splitlines()):
+        if line.strip().startswith("https://huggingface.co/"):
+            link = line.strip()
+            break
+    return True, link or log.strip()
+
+
 def free_disk_gb(path: Path) -> float:
     st = os.statvfs(str(path))
     return (st.f_bavail * st.f_frsize) / (1024**3)
@@ -416,7 +445,9 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if code != 0:
                 await q.message.reply_text(f"Обучение завершилось с ошибкой:\n{log}")
                 return
-            hf_link = os.getenv("PIPELINE_LAST_HF_LINK", "").strip() or "(ссылка не указана)"
+            await q.message.reply_text("Обучение завершено. Загружаю веса на Hugging Face...")
+            ok_pub, pub_result = await publish_to_hf(root, flow["run_id"], outdir, ds_csv, ds_report)
+            hf_link = pub_result if ok_pub else f"публикация не удалась: {pub_result}"
             test_hint = os.getenv("PIPELINE_TEST_HINT", "Отправь тестовый запрос в этого же бота.")
             await q.message.reply_text(
                 "Готово!\n"
@@ -434,6 +465,8 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "cmd": cmd,
             "dataset": str(ds_csv),
             "outdir": str(outdir),
+            "run_id": flow["run_id"],
+            "report": str(ds_report),
             "created_at": datetime.utcnow().isoformat() + "Z",
             "retries": 0,
         }
