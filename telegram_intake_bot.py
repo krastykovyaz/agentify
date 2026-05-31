@@ -30,6 +30,7 @@ TARGET = int(os.getenv("DATASET_TARGET_LIMIT", "1000"))
 AGENT_STYLES = ["summary", "qa", "extraction", "dialogue", "telegram", "universal"]
 STYLE_MODEL = os.getenv("OLLAMA_MODEL_UNIVERSAL", "agentify-universal-q4_k_m")
 QA_MODEL = os.getenv("OLLAMA_MODEL_QA", "agentify:qa_q3_k")
+STYLE_SAMPLE_LIMIT = int(os.getenv("STYLE_SAMPLE_LIMIT", "24"))
 
 
 def norm(s: str) -> str:
@@ -325,6 +326,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await tg_file.download_to_drive(str(local_path))
 
     await update.message.reply_text(f"Файл принят: {local_name}. Анализирую...")
+    await update.message.reply_text("Анализирую стиль и распределение, это может занять немного времени...")
 
     try:
         texts = read_texts(local_path)
@@ -332,16 +334,20 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         styles = []
         agree_n = 0
         agent_failed_n = 0
-        qa_ratio = ask_qa_style_ratio(base_url, texts)
-        # classify all texts; universal agent is source of truth on mismatch.
-        for t in texts:
-            final_style, agent_style, heuristic_style, agreed = classify_style_with_consensus(base_url, t)
-            _ = heuristic_style
-            styles.append(final_style)
-            if agreed:
-                agree_n += 1
-            if agent_style == "failed":
-                agent_failed_n += 1
+        qa_ratio = ask_qa_style_ratio(base_url, texts[:STYLE_SAMPLE_LIMIT])
+        # Use the universal agent only on a bounded sample to keep the bot responsive.
+        sample_n = min(len(texts), STYLE_SAMPLE_LIMIT)
+        for i, t in enumerate(texts):
+            if i < sample_n:
+                final_style, agent_style, heuristic_style, agreed = classify_style_with_consensus(base_url, t)
+                _ = heuristic_style
+                styles.append(final_style)
+                if agreed:
+                    agree_n += 1
+                if agent_style == "failed":
+                    agent_failed_n += 1
+            else:
+                styles.append(infer_style(t))
         report = build_report(texts, styles, qa_ratio, agree_n, agent_failed_n)
 
         context.chat_data["flow"] = {
