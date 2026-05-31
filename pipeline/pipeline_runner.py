@@ -9,6 +9,7 @@ import random
 import re
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
@@ -55,6 +56,10 @@ def infer_task(text: str) -> str:
     if len(t) > 500:
         return "summary"
     return "universal"
+
+
+def is_enabled_env(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def read_input_rows(path: Path) -> List[str]:
@@ -162,6 +167,41 @@ def make_train_row(text: str, task: str, wrapper_prompt: str) -> dict:
     }
 
 
+def heuristic_output(text: str, task: str) -> str:
+    t = normalize_text(text)
+    if task == "summary":
+        parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", t) if p.strip()]
+        if parts:
+            return parts[0][:500]
+        return t[:400]
+    if task == "qa":
+        m = re.search(r"(?:ответ|answer)[:\s]+(.+)$", t, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            return normalize_text(m.group(1))[:500]
+        sentences = [p.strip() for p in re.split(r"(?<=[.!?])\s+", t) if p.strip()]
+        return sentences[-1][:400] if sentences else t[:240]
+    if task == "extraction":
+        phone = re.search(r"(\+?\d[\d\s\-\(\)]{7,}\d)", t)
+        price = re.search(r"(\d[\d\s]*руб(?:/мес)?|\d[\d\s]*₽)", t, flags=re.IGNORECASE)
+        city = re.search(r"(Ижевск|Москва|Мытищи|Казань|СПб|Санкт-Петербург|Екатеринбург|Новосибирск)", t, flags=re.IGNORECASE)
+        items = []
+        if price:
+            items.append(f"\"price\": \"{normalize_text(price.group(1))}\"")
+        if city:
+            items.append(f"\"city\": \"{normalize_text(city.group(1))}\"")
+        if phone:
+            items.append(f"\"phone\": \"{normalize_text(phone.group(1))}\"")
+        if not items:
+            items.append(f"\"text\": \"{t[:220]}\"")
+        return "{ " + ", ".join(items) + " }"
+    if task == "dialogue":
+        return "Понимаю вас. Давайте спокойно разберем ситуацию и найдем самый полезный следующий шаг."
+    if task == "telegram":
+        short = t[:900]
+        return normalize_text(short)
+    return t[:600]
+
+
 def stratified_trim(rows: List[dict], target: int, seed: int) -> List[dict]:
     if len(rows) <= target:
         return rows
@@ -186,6 +226,7 @@ def augment_to_target(rows: List[dict], cfg: dict, target: int, seed: int) -> Li
     if len(rows) >= target:
         return rows
     rnd = random.Random(seed)
+    no_llm = is_enabled_env("PREPARE_DATASET_NOLLM", "0")
 
     agents = cfg["agents"]
     base_url = cfg["ollama_base_url"]
@@ -226,15 +267,18 @@ def augment_to_target(rows: List[dict], cfg: dict, target: int, seed: int) -> Li
         base = rnd.choice(seeds)
         src_text = base["input"]
 
-        try:
-            out = call_ollama(base_url, model, system, src_text)
-        except Exception:
-            # fallback through universal
+        if no_llm:
+            out = heuristic_output(src_text, t)
+        else:
             try:
-                ua = agents["universal"]
-                out = call_ollama(base_url, ua["model"], load_prompt(ua["prompt_file"]), src_text)
+                out = call_ollama(base_url, model, system, src_text)
             except Exception:
-                break
+                # fallback through universal
+                try:
+                    ua = agents["universal"]
+                    out = call_ollama(base_url, ua["model"], load_prompt(ua["prompt_file"]), src_text)
+                except Exception:
+                    break
 
         if not out:
             continue
@@ -256,6 +300,19 @@ def augment_to_target(rows: List[dict], cfg: dict, target: int, seed: int) -> Li
 
 
 def materialize_outputs(rows: List[dict], cfg: dict) -> List[dict]:
+    if is_enabled_env("PREPARE_DATASET_NOLLM", "0"):
+        out_rows = []
+        total = len(rows)
+        for idx, r in enumerate(rows, start=1):
+            rr = dict(r)
+            if not normalize_text(str(rr.get("output", ""))):
+                task = rr.get("task", "universal")
+                rr["output"] = heuristic_output(rr.get("input", ""), task)
+            out_rows.append(rr)
+            if idx % 25 == 0 or idx == total:
+                log(f"[materialize:nollm] {idx}/{total}")
+        return out_rows
+
     base_url = cfg["ollama_base_url"]
     agents = cfg["agents"]
     out_rows = []
@@ -311,6 +368,7 @@ def main():
     env_synth = os.getenv("SYNTHETIC_MAX_RATIO", "").strip()
     if env_synth:
         cfg["synthetic_max_ratio"] = float(env_synth)
+    no_llm = is_enabled_env("PREPARE_DATASET_NOLLM", "0")
     seed = int(cfg.get("random_seed", 42))
     wrapper_prompt = load_prompt(cfg.get("final_wrapper_prompt_file", ""))
 
@@ -320,6 +378,8 @@ def main():
 
     original_n = len(rows)
     log(f"[stage] initial rows={original_n} target={target}")
+    if no_llm:
+        log("[mode] PREPARE_DATASET_NOLLM=1 -> skipping all model calls")
     if original_n > target:
         log("[stage] trimming to target")
         rows = stratified_trim(rows, target, seed)
@@ -358,6 +418,7 @@ def main():
     report = {
         "input": args.input,
         "target": target,
+        "mode": "nollm" if no_llm else "llm",
         "original_rows": original_n,
         "final_rows": len(rows),
         "task_distribution": dict(Counter(r["task"] for r in rows)),
