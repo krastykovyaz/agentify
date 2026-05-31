@@ -37,7 +37,7 @@ def free_gpu_mb() -> int | None:
 
 def can_run(root: Path) -> tuple[bool, str]:
     min_disk = float(os.getenv("TRAIN_MIN_FREE_DISK_GB", "30"))
-    min_gpu = int(os.getenv("TRAIN_MIN_FREE_GPU_MB", "12000"))
+    min_gpu = int(os.getenv("TRAIN_MIN_FREE_GPU_MB", "20000"))
     d = free_disk_gb(root)
     g = free_gpu_mb()
     if d < min_disk:
