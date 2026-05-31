@@ -491,6 +491,9 @@ def main():
     if not token:
         raise SystemExit("Set TG_BOT_TOKEN in .env")
 
+    global TARGET
+    TARGET = int(os.getenv("DATASET_TARGET_LIMIT", "1000"))
+
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(on_flow_button, pattern=r"^flow:"))
