@@ -297,6 +297,19 @@ def allowed_file(name: str) -> bool:
     return Path(name or "").suffix.lower() in {".csv", ".json", ".txt"}
 
 
+def find_project_root() -> Path:
+    env_root = os.getenv("AGENTIFY_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).resolve()
+
+    here = Path(__file__).resolve()
+    candidates = [here.parent, here.parent.parent, here.parent.parent.parent]
+    for candidate in candidates:
+        if (candidate / "pipeline" / "pipeline_runner.py").exists() or (candidate / ".env").exists():
+            return candidate
+    return here.parent
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Отправь файл с текстами (csv/json/txt). Дальше пойдем пошагово: анализ -> подготовка датасета -> обучение -> финальный ответ со ссылкой."
@@ -315,7 +328,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Поддерживаются только файлы: .csv .json .txt")
         return
 
-    root = Path(os.getenv("AGENTIFY_ROOT", "/home/aleksandr.koviazin/kovyaz/agentify")).resolve()
+    root = find_project_root()
     inbox = root / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
 
@@ -377,7 +390,7 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Нет активной сессии. Отправь файл заново.")
         return
 
-    root = Path(os.getenv("AGENTIFY_ROOT", "/home/aleksandr.koviazin/kovyaz/agentify")).resolve()
+    root = find_project_root()
     run_dir = root / "runs" / flow["run_id"]
     run_dir.mkdir(parents=True, exist_ok=True)
     ds_csv = run_dir / "pipeline_train_1000.csv"
