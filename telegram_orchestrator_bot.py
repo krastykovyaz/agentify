@@ -46,6 +46,19 @@ def _env(name: str, default: str) -> str:
     return v if v else default
 
 
+def find_project_root() -> Path:
+    env_root = os.getenv("AGENTIFY_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).resolve()
+
+    here = Path(__file__).resolve()
+    candidates = [here.parent, here.parent.parent, here.parent.parent.parent]
+    for candidate in candidates:
+        if (candidate / "pipeline" / "pipeline_runner.py").exists() or (candidate / ".env").exists():
+            return candidate
+    return here.parent
+
+
 def load_prompt(path: str, fallback: str) -> str:
     p = Path(path)
     if p.exists():
@@ -256,7 +269,7 @@ def main():
     if not token:
         raise SystemExit("Set TG_BOT_TOKEN in env/.env")
 
-    root = Path(os.getenv("AGENTIFY_ROOT", "/home/aleksandr.koviazin/kovyaz/agentify")).resolve()
+    root = find_project_root()
     base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
 
     pipeline_script = root / "pipeline" / "pipeline_runner.py"

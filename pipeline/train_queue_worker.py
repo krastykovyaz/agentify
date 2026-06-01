@@ -12,6 +12,19 @@ import requests
 from dotenv import load_dotenv
 
 
+def find_project_root() -> Path:
+    env_root = os.getenv("AGENTIFY_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).resolve()
+
+    here = Path(__file__).resolve()
+    candidates = [here.parent.parent, here.parent.parent.parent]
+    for candidate in candidates:
+        if (candidate / "pipeline" / "pipeline_runner.py").exists() or (candidate / ".env").exists():
+            return candidate
+    return here.parent.parent
+
+
 def send_tg(token: str, chat_id: int, text: str):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=30)
@@ -85,7 +98,7 @@ def extract_hf_link(text: str) -> str:
 
 def main():
     load_dotenv()
-    root = Path(os.getenv("AGENTIFY_ROOT", "/home/aleksandr.koviazin/kovyaz/agentify")).resolve()
+    root = find_project_root()
     qdir = root / "queue" / "train"
     qdir.mkdir(parents=True, exist_ok=True)
 

@@ -310,6 +310,18 @@ def find_project_root() -> Path:
     return here.parent
 
 
+def find_training_script(root: Path) -> Path:
+    candidates = [
+        root / "sft_train_gemma_universal.py",
+        root / "sft_train_gemma_coding.py",
+        root / "sft_train_gemma_coding_web_format.py",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Отправь файл с текстами (csv/json/txt). Дальше пойдем пошагово: анализ -> подготовка датасета -> обучение -> финальный ответ со ссылкой."
@@ -449,9 +461,10 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Training command is configurable; keep simple default
         train_cmd = os.getenv("PIPELINE_TRAIN_CMD", "").strip()
         if not train_cmd:
+            train_script = find_training_script(root)
             await q.message.reply_text(
                 "Не задан PIPELINE_TRAIN_CMD. Укажи команду обучения в .env, например:\n"
-                "PIPELINE_TRAIN_CMD=python3 /home/aleksandr.koviazin/kovyaz/agentify/sft_train_gemma_universal.py --csv-path {DATASET} --output-dir {OUTDIR}"
+                f"PIPELINE_TRAIN_CMD=python3 {train_script} --csv-path {{DATASET}} --output-dir {{OUTDIR}}"
             )
             return
 
