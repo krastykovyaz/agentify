@@ -322,6 +322,19 @@ def find_training_script(root: Path) -> Path:
     return candidates[0]
 
 
+def normalize_train_cmd(train_cmd: str, root: Path, dataset: Path, outdir: Path) -> str:
+    cmd = train_cmd.replace("{DATASET}", str(dataset)).replace("{OUTDIR}", str(outdir))
+    cmd = cmd.replace("{ROOT}", str(root))
+    parts = shlex.split(cmd)
+    if len(parts) >= 2 and parts[0].startswith("python"):
+        script_path = Path(parts[1])
+        if script_path.is_absolute() and not script_path.exists():
+            local_candidate = root / script_path.name
+            if local_candidate.exists():
+                parts[1] = str(local_candidate)
+    return shlex.join(parts)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Отправь файл с текстами (csv/json/txt). Дальше пойдем пошагово: анализ -> подготовка датасета -> обучение -> финальный ответ со ссылкой."
@@ -469,7 +482,7 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         outdir = run_dir / "model_out"
-        cmd = train_cmd.replace("{DATASET}", str(ds_csv)).replace("{OUTDIR}", str(outdir))
+        cmd = normalize_train_cmd(train_cmd, root, ds_csv, outdir)
         ok, why = resource_check(root)
         if ok:
             await q.message.reply_text(f"Ресурсы достаточны, запускаю сразу ({why})")
