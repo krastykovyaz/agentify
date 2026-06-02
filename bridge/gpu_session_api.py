@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 class SessionCreate(BaseModel):
     agent_name: str = Field(..., min_length=1)
     hf_model: str = Field(..., min_length=1)
+    runtime_model: str | None = None
     user_id: int | None = None
     chat_id: int | None = None
     idle_timeout_sec: int = Field(default=900, ge=60)
@@ -24,6 +25,7 @@ class SessionStatus(BaseModel):
     session_id: str
     agent_name: str
     hf_model: str
+    runtime_model: str | None = None
     state: str
     created_at: str
     idle_timeout_sec: int
@@ -68,6 +70,7 @@ def create_session(payload: SessionCreate):
         "session_id": session_id,
         "agent_name": payload.agent_name,
         "hf_model": payload.hf_model,
+        "runtime_model": payload.runtime_model or payload.hf_model,
         "state": "queued",
         "created_at": now,
         "idle_timeout_sec": int(payload.idle_timeout_sec),
@@ -104,3 +107,47 @@ def stop_session(session_id: str):
     _write_session(data)
     return data
 
+
+@app.post("/v1/sessions/{session_id}/reply")
+def reply_session(session_id: str, payload: dict):
+    data = _read_session(session_id)
+    user_text = str(payload.get("text") or "").strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    if data.get("state") != "running":
+        data["state"] = "running"
+        _write_session(data)
+
+    ollama_url = os.getenv("GPU_OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+    model = str(data.get("runtime_model") or data.get("hf_model") or "").strip()
+    system = (
+        f"Ты тестовый агент {data.get('agent_name')}. "
+        "Отвечай по задаче пользователя кратко и по делу."
+    )
+    try:
+        r = requests.post(
+            ollama_url + "/api/chat",
+            json={
+                "model": model,
+                "stream": False,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_text},
+                ],
+                "options": {"temperature": 0.2, "top_p": 0.9, "num_ctx": 8192},
+            },
+            timeout=120,
+        )
+        r.raise_for_status()
+        content = (r.json().get("message") or {}).get("content", "").strip()
+        if not content:
+            raise RuntimeError("empty model response")
+        data["notes"] = "reply served via ollama"
+        _write_session(data)
+        return {"session_id": session_id, "reply": content, "model": model, "state": data["state"]}
+    except Exception as e:
+        fallback = (
+            f"[stub reply] Session {session_id} is ready, but model '{model}' could not be called: {e}"
+        )
+        return {"session_id": session_id, "reply": fallback, "model": model, "state": data["state"]}

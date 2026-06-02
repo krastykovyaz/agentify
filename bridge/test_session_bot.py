@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+from urllib.parse import quote
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict
@@ -57,6 +58,17 @@ def build_agents() -> Dict[str, AgentItem]:
     }
 
 
+def bot_username() -> str:
+    return _env("TG_TEST_BOT_USERNAME", "")
+
+
+def deep_link(session_id: str) -> str:
+    username = bot_username()
+    if not username:
+        return f"session:{session_id}"
+    return f"https://t.me/{username}?start={quote(session_id)}"
+
+
 def keyboard(agents: Dict[str, AgentItem]) -> InlineKeyboardMarkup:
     rows = []
     order = ["summary", "qa", "extraction", "dialogue", "telegram", "universal"]
@@ -68,6 +80,26 @@ def keyboard(agents: Dict[str, AgentItem]) -> InlineKeyboardMarkup:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agents = context.application.bot_data["agents"]
+    args = context.args or []
+    if args:
+        session_id = args[0].strip()
+        if session_id:
+            api_url = context.application.bot_data["gpu_api_url"]
+            try:
+                session = await asyncio.to_thread(get_gpu_session, api_url, session_id)
+                context.chat_data["session_id"] = session_id
+                context.chat_data["selected_agent"] = str(session.get("agent_name") or "universal")
+                await update.message.reply_text(
+                    "Тестовая сессия подключена.\n"
+                    f"Session: {session_id}\n"
+                    f"Агент: {session.get('agent_name')}\n"
+                    f"Модель: {session.get('hf_model')}\n"
+                    "Теперь отправь текст, и я передам его в GPU API."
+                )
+                return
+            except Exception as e:
+                await update.message.reply_text(f"Не удалось подключить сессию {session_id}: {e}")
+                return
     await update.message.reply_text(
         "Это тестовый бот для запуска временной сессии агента.\n"
         "Выбери агента кнопкой и отправь сообщение для теста.",
@@ -98,6 +130,7 @@ async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Неизвестный агент")
         return
     context.chat_data["selected_agent"] = key
+    context.chat_data.pop("session_id", None)
     a = agents[key]
     await q.edit_message_text(f"Агент выбран: {a.label}\nМодель: {a.hf_model}")
     await q.message.reply_text("Теперь отправь текст, и я открою тестовую сессию для этого агента.")
@@ -107,11 +140,28 @@ def create_gpu_session(api_url: str, agent_name: str, hf_model: str, user_id: in
     payload = {
         "agent_name": agent_name,
         "hf_model": hf_model,
+        "runtime_model": hf_model,
         "user_id": user_id,
         "chat_id": chat_id,
         "idle_timeout_sec": idle_timeout_sec,
     }
     r = requests.post(api_url.rstrip("/") + "/v1/sessions", json=payload, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def reply_gpu_session(api_url: str, session_id: str, text: str) -> dict:
+    r = requests.post(
+        api_url.rstrip("/") + f"/v1/sessions/{session_id}/reply",
+        json={"text": text},
+        timeout=180,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def get_gpu_session(api_url: str, session_id: str) -> dict:
+    r = requests.get(api_url.rstrip("/") + f"/v1/sessions/{session_id}", timeout=30)
     r.raise_for_status()
     return r.json()
 
@@ -123,26 +173,38 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api_url = context.application.bot_data["gpu_api_url"]
     key = context.chat_data.get("selected_agent", "universal")
     agent = agents.get(key, agents["universal"])
+    session_id = context.chat_data.get("session_id")
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     try:
-        session = await asyncio.to_thread(
-            create_gpu_session,
-            api_url,
-            agent.key,
-            agent.hf_model,
-            update.effective_user.id if update.effective_user else None,
-            update.effective_chat.id if update.effective_chat else None,
-            int(context.application.bot_data["idle_timeout_sec"]),
-        )
-        link = session.get("runtime_url") or f"{api_url.rstrip('/')}/v1/sessions/{session['session_id']}"
+        if not session_id:
+            session = await asyncio.to_thread(
+                create_gpu_session,
+                api_url,
+                agent.key,
+                agent.hf_model,
+                update.effective_user.id if update.effective_user else None,
+                update.effective_chat.id if update.effective_chat else None,
+                int(context.application.bot_data["idle_timeout_sec"]),
+            )
+            session_id = session["session_id"]
+            context.chat_data["session_id"] = session_id
+            link = deep_link(session_id)
+            await update.message.reply_text(
+                "Тестовая сессия создана.\n"
+                f"Агент: {agent.label}\n"
+                f"Модель: {agent.hf_model}\n"
+                f"Session: {session_id}\n"
+                f"Ссылка на тест: {link}\n\n"
+                "Открой ссылку в Telegram, чтобы продолжить тестирование в отдельной сессии."
+            )
+            return
+
+        reply = await asyncio.to_thread(reply_gpu_session, api_url, session_id, update.message.text)
+        text = str(reply.get("reply") or "").strip()
+        model = str(reply.get("model") or agent.hf_model)
         await update.message.reply_text(
-            "Тестовая сессия создана.\n"
-            f"Агент: {agent.label}\n"
-            f"Модель: {agent.hf_model}\n"
-            f"Session: {session['session_id']}\n"
-            f"Ссылка: {link}\n\n"
-            "Пока это заглушка API-контракта. Следующим шагом подключим реальный Docker runtime и скачивание модели с Hugging Face."
+            f"[{agent.label}]\nМодель: {model}\n\n{text}"
         )
     except Exception as e:
         await update.message.reply_text(f"Не удалось создать тестовую сессию: {e}")

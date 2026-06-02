@@ -10,6 +10,7 @@ import asyncio
 import subprocess
 import shlex
 import uuid
+from urllib.parse import quote
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -322,6 +323,13 @@ def find_training_script(root: Path) -> Path:
     return candidates[0]
 
 
+def build_test_bot_link(session_id: str) -> str:
+    username = os.getenv("TG_TEST_BOT_USERNAME", "").strip()
+    if not username:
+        return f"session:{session_id}"
+    return f"https://t.me/{username}?start={quote(session_id)}"
+
+
 def normalize_train_cmd(train_cmd: str, root: Path, dataset: Path, outdir: Path) -> str:
     cmd = train_cmd.replace("{DATASET}", str(dataset)).replace("{OUTDIR}", str(outdir))
     cmd = cmd.replace("{ROOT}", str(root))
@@ -333,6 +341,19 @@ def normalize_train_cmd(train_cmd: str, root: Path, dataset: Path, outdir: Path)
             if local_candidate.exists():
                 parts[1] = str(local_candidate)
     return shlex.join(parts)
+
+
+def create_test_session(api_url: str, agent_name: str, hf_model: str, chat_id: int | None, idle_timeout_sec: int = 900) -> dict:
+    payload = {
+        "agent_name": agent_name,
+        "hf_model": hf_model,
+        "runtime_model": hf_model,
+        "chat_id": chat_id,
+        "idle_timeout_sec": idle_timeout_sec,
+    }
+    r = requests.post(api_url.rstrip("/") + "/v1/sessions", json=payload, timeout=30)
+    r.raise_for_status()
+    return r.json()
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -494,9 +515,27 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ok_pub, pub_result = await publish_to_hf(root, flow["run_id"], outdir, ds_csv, ds_report)
             hf_link = pub_result if ok_pub else f"публикация не удалась: {pub_result}"
             test_hint = os.getenv("PIPELINE_TEST_HINT", "Отправь тестовый запрос в этого же бота.")
+            test_link = ""
+            gpu_api = os.getenv("GPU_API_URL", "").strip()
+            if ok_pub and gpu_api:
+                try:
+                    session = await asyncio.to_thread(
+                        create_test_session,
+                        gpu_api,
+                        "universal",
+                        hf_link,
+                        q.message.chat_id,
+                        int(os.getenv("TEST_SESSION_IDLE_SEC", "900")),
+                    )
+                    test_link = build_test_bot_link(str(session.get("session_id", "")))
+                    if test_link.startswith("session:"):
+                        test_link = ""
+                except Exception as e:
+                    logger.warning("test session creation failed: %s", e)
             await q.message.reply_text(
                 "Готово!\n"
                 f"Ссылка на агента: {hf_link}\n"
+                f"{('Ссылка на тест-бота: ' + test_link + '\\n') if test_link else ''}"
                 f"Тестировать можно здесь: {test_hint}"
             )
             return
