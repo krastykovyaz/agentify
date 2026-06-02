@@ -382,6 +382,27 @@ def create_train_job(
     return r.json()
 
 
+def upload_train_job_artifacts(api_url: str, job_id: str, dataset_csv: Path, report_json: Path) -> dict:
+    files = {
+        "dataset_csv": ("pipeline_train_1000.csv", dataset_csv.open("rb"), "text/csv"),
+        "report_json": ("pipeline_train_1000.report.json", report_json.open("rb"), "application/json"),
+    }
+    try:
+        r = requests.post(
+            api_url.rstrip("/") + f"/v1/train-jobs/{job_id}/artifacts",
+            files=files,
+            timeout=120,
+        )
+        r.raise_for_status()
+        return r.json()
+    finally:
+        for _, ftuple in files.items():
+            try:
+                ftuple[1].close()
+            except Exception:
+                pass
+
+
 def run_train_job(api_url: str, job_id: str) -> dict:
     r = requests.post(api_url.rstrip("/") + f"/v1/train-jobs/{job_id}/run", timeout=60 * 60 * 6)
     if r.status_code >= 400:
@@ -567,6 +588,7 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     int(os.getenv("TEST_SESSION_IDLE_SEC", "900")),
                 )
                 job_id = str(train_job.get("job_id") or "")
+                await asyncio.to_thread(upload_train_job_artifacts, gpu_api, job_id, ds_csv, ds_report)
                 await q.message.reply_text(f"GPU job создан: {job_id}. Запускаю...")
                 result = await asyncio.to_thread(run_train_job, gpu_api, job_id)
                 if result.get("state") != "done":

@@ -13,7 +13,7 @@ import uuid as uuidlib
 import re
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -110,6 +110,12 @@ def _session_path(session_id: str) -> Path:
 
 def _job_path(job_id: str) -> Path:
     return JOBS_DIR / f"{job_id}.json"
+
+
+def _job_artifacts_dir(job_id: str) -> Path:
+    p = JOBS_DIR / job_id
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def _write_session(data: dict) -> None:
@@ -287,6 +293,27 @@ def create_train_job(payload: TrainJobCreate):
         "hf_link": None,
         "notes": "queued",
     }
+    _write_job(data)
+    return data
+
+
+@app.post("/v1/train-jobs/{job_id}/artifacts", response_model=TrainJobStatus)
+def upload_train_job_artifacts(
+    job_id: str,
+    dataset_csv: UploadFile | None = File(default=None),
+    report_json: UploadFile | None = File(default=None),
+):
+    data = _read_job(job_id)
+    art_dir = _job_artifacts_dir(job_id)
+    if dataset_csv is None and report_json is None:
+        raise HTTPException(status_code=400, detail="no artifacts uploaded")
+    if dataset_csv is not None:
+        (art_dir / "pipeline_train_1000.csv").write_bytes(dataset_csv.file.read())
+        data["dataset_csv"] = str(art_dir / "pipeline_train_1000.csv")
+    if report_json is not None:
+        (art_dir / "pipeline_train_1000.report.json").write_bytes(report_json.file.read())
+        data["report_json"] = str(art_dir / "pipeline_train_1000.report.json")
+    data["notes"] = "artifacts uploaded"
     _write_job(data)
     return data
 
