@@ -363,7 +363,7 @@ def create_train_job(
     report_json: Path,
     train_cmd: str,
     publish_cmd: str,
-    workdir: Path,
+    workdir: Path | None,
     chat_id: int | None,
     idle_timeout_sec: int = 900,
 ) -> dict:
@@ -373,7 +373,7 @@ def create_train_job(
         "report_json": str(report_json),
         "train_cmd": train_cmd,
         "publish_cmd": publish_cmd,
-        "workdir": str(workdir),
+        "workdir": str(workdir) if workdir else "",
         "chat_id": chat_id,
         "idle_timeout_sec": idle_timeout_sec,
     }
@@ -562,7 +562,7 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ds_report,
                     cmd,
                     publish_cmd.replace("{ROOT}", str(root)).replace("{OUTDIR}", str(outdir)).replace("{DATASET}", str(ds_csv)).replace("{REPORT}", str(ds_report)),
-                    root,
+                    None,
                     q.message.chat_id,
                     int(os.getenv("TEST_SESSION_IDLE_SEC", "900")),
                 )

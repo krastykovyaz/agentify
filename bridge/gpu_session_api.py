@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import tempfile
 import uuid as uuidlib
+import re
 
 import requests
 from fastapi import FastAPI, HTTPException
@@ -134,6 +135,7 @@ def _read_job(job_id: str) -> dict:
 
 
 def _run_subprocess(cmd: str, cwd: Path | None = None) -> tuple[int, str]:
+    cmd = _normalize_cmd_paths(cmd)
     proc = subprocess.Popen(
         shlex.split(cmd),
         cwd=str(cwd) if cwd else str(ROOT),
@@ -143,6 +145,18 @@ def _run_subprocess(cmd: str, cwd: Path | None = None) -> tuple[int, str]:
     )
     out, _ = proc.communicate()
     return proc.returncode, (out or "")[-10000:]
+
+
+def _normalize_cmd_paths(cmd: str) -> str:
+    local_root = str(ROOT)
+    remote_root = os.getenv("CPU_AGENTIFY_ROOT", "").strip()
+    if remote_root:
+        cmd = cmd.replace(remote_root, local_root)
+    # replace common placeholders and stale absolute paths
+    cmd = cmd.replace("{ROOT}", local_root)
+    for stale in ["/home/alex/agentify", "/home/aleksandr.koviazin/kovyaz/agentify"]:
+        cmd = cmd.replace(stale, local_root)
+    return cmd
 
 
 def _gpu_ready() -> tuple[bool, str]:
@@ -293,7 +307,10 @@ def run_train_job(job_id: str):
         _write_job(data)
         raise HTTPException(status_code=409, detail=why)
 
-    workdir = Path(data.get("workdir") or ROOT).resolve()
+    workdir_raw = str(data.get("workdir") or "").strip()
+    workdir = Path(workdir_raw).resolve() if workdir_raw else ROOT
+    if not workdir.exists():
+        workdir = ROOT
     data["state"] = "running"
     data["notes"] = "training"
     _write_job(data)
