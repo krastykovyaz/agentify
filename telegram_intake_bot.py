@@ -284,14 +284,10 @@ def free_gpu_mb() -> int | None:
 
 def resource_check(root: Path) -> tuple[bool, str]:
     min_disk = float(os.getenv("TRAIN_MIN_FREE_DISK_GB", "30"))
-    min_gpu = int(os.getenv("TRAIN_MIN_FREE_GPU_MB", "20000"))
     d = free_disk_gb(root)
-    g = free_gpu_mb()
     if d < min_disk:
         return False, f"disk {d:.1f}GB < {min_disk}GB"
-    if g is not None and g < min_gpu:
-        return False, f"gpu_free {g}MB < {min_gpu}MB"
-    return True, f"disk {d:.1f}GB, gpu_free {g if g is not None else 'n/a'}MB"
+    return True, f"disk {d:.1f}GB"
 
 
 def allowed_file(name: str) -> bool:
@@ -353,6 +349,43 @@ def create_test_session(api_url: str, agent_name: str, hf_model: str, chat_id: i
     }
     r = requests.post(api_url.rstrip("/") + "/v1/sessions", json=payload, timeout=30)
     r.raise_for_status()
+    return r.json()
+
+
+def create_train_job(
+    api_url: str,
+    run_id: str,
+    dataset_csv: Path,
+    report_json: Path,
+    train_cmd: str,
+    publish_cmd: str,
+    workdir: Path,
+    chat_id: int | None,
+    idle_timeout_sec: int = 900,
+) -> dict:
+    payload = {
+        "run_id": run_id,
+        "dataset_csv": str(dataset_csv),
+        "report_json": str(report_json),
+        "train_cmd": train_cmd,
+        "publish_cmd": publish_cmd,
+        "workdir": str(workdir),
+        "chat_id": chat_id,
+        "idle_timeout_sec": idle_timeout_sec,
+    }
+    r = requests.post(api_url.rstrip("/") + "/v1/train-jobs", json=payload, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def run_train_job(api_url: str, job_id: str) -> dict:
+    r = requests.post(api_url.rstrip("/") + f"/v1/train-jobs/{job_id}/run", timeout=60 * 60 * 6)
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail", r.text)
+        except Exception:
+            detail = r.text
+        return {"error": detail, "status_code": r.status_code}
     return r.json()
 
 
@@ -506,18 +539,37 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cmd = normalize_train_cmd(train_cmd, root, ds_csv, outdir)
         ok, why = resource_check(root)
         if ok:
-            await q.message.reply_text(f"Ресурсы достаточны, запускаю сразу ({why})")
-            code, log = await run_cmd(shlex.split(cmd), root)
-            if code != 0:
-                await q.message.reply_text(f"Обучение завершилось с ошибкой:\n{log}")
-                return
-            await q.message.reply_text("Обучение завершено. Загружаю веса на Hugging Face...")
-            ok_pub, pub_result = await publish_to_hf(root, flow["run_id"], outdir, ds_csv, ds_report)
-            hf_link = pub_result if ok_pub else f"публикация не удалась: {pub_result}"
-            test_hint = os.getenv("PIPELINE_TEST_HINT", "Отправь тестовый запрос в этого же бота.")
-            test_link = ""
             gpu_api = os.getenv("GPU_API_URL", "").strip()
-            if ok_pub and gpu_api:
+            if gpu_api:
+                await q.message.reply_text(f"Ресурсы достаточны, отправляю job на GPU backend ({why})")
+                publish_cmd = (
+                    f"python3 {{ROOT}}/pipeline/publish_run_to_hf.py "
+                    f"--outdir {{OUTDIR}} --run-id {flow['run_id']} --dataset {{DATASET}} --report {{REPORT}}"
+                )
+                train_job = await asyncio.to_thread(
+                    create_train_job,
+                    gpu_api,
+                    flow["run_id"],
+                    ds_csv,
+                    ds_report,
+                    cmd,
+                    publish_cmd.replace("{ROOT}", str(root)).replace("{OUTDIR}", str(outdir)).replace("{DATASET}", str(ds_csv)).replace("{REPORT}", str(ds_report)),
+                    root,
+                    q.message.chat_id,
+                    int(os.getenv("TEST_SESSION_IDLE_SEC", "900")),
+                )
+                job_id = str(train_job.get("job_id") or "")
+                await q.message.reply_text(f"GPU job создан: {job_id}. Запускаю...")
+                result = await asyncio.to_thread(run_train_job, gpu_api, job_id)
+                if result.get("state") != "done":
+                    await q.message.reply_text(f"Обучение на GPU завершилось с ошибкой:\n{result.get('notes') or result.get('error') or result}")
+                    return
+                hf_link = str(result.get("hf_link") or "")
+                if not hf_link:
+                    await q.message.reply_text(f"Обучение завершено, но ссылку не удалось извлечь:\n{result}")
+                    return
+                test_hint = os.getenv("PIPELINE_TEST_HINT", "Отправь тестовый запрос в этого же бота.")
+                test_link = ""
                 try:
                     session = await asyncio.to_thread(
                         create_test_session,
@@ -532,16 +584,24 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         test_link = ""
                 except Exception as e:
                     logger.warning("test session creation failed: %s", e)
-            lines = [
-                "Готово!",
-                f"Ссылка на агента: {hf_link}",
-            ]
-            if test_link:
-                lines.append(f"Ссылка на тест-бота: {test_link}")
-            lines.append(f"Тестировать можно здесь: {test_hint}")
-            await q.message.reply_text(
-                "\n".join(lines)
-            )
+                lines = ["Готово!", f"Ссылка на агента: {hf_link}"]
+                if test_link:
+                    lines.append(f"Ссылка на тест-бота: {test_link}")
+                lines.append(f"Тестировать можно здесь: {test_hint}")
+                await q.message.reply_text("\n".join(lines))
+                return
+
+            await q.message.reply_text(f"Ресурсы достаточны, запускаю сразу ({why})")
+            code, log = await run_cmd(shlex.split(cmd), root)
+            if code != 0:
+                await q.message.reply_text(f"Обучение завершилось с ошибкой:\n{log}")
+                return
+            await q.message.reply_text("Обучение завершено. Загружаю веса на Hugging Face...")
+            ok_pub, pub_result = await publish_to_hf(root, flow["run_id"], outdir, ds_csv, ds_report)
+            hf_link = pub_result if ok_pub else f"публикация не удалась: {pub_result}"
+            test_hint = os.getenv("PIPELINE_TEST_HINT", "Отправь тестовый запрос в этого же бота.")
+            lines = ["Готово!", f"Ссылка на агента: {hf_link}", f"Тестировать можно здесь: {test_hint}"]
+            await q.message.reply_text("\n".join(lines))
             return
 
         # queue when not enough resources

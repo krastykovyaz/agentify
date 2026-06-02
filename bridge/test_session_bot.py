@@ -166,6 +166,17 @@ def get_gpu_session(api_url: str, session_id: str) -> dict:
     return r.json()
 
 
+def launch_gpu_session(api_url: str, session_id: str) -> dict:
+    r = requests.post(api_url.rstrip("/") + f"/v1/sessions/{session_id}/launch", timeout=30)
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail", r.text)
+        except Exception:
+            detail = r.text
+        return {"error": detail, "status_code": r.status_code}
+    return r.json()
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -188,14 +199,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 int(context.application.bot_data["idle_timeout_sec"]),
             )
             session_id = session["session_id"]
+            launch = await asyncio.to_thread(launch_gpu_session, api_url, session_id)
             context.chat_data["session_id"] = session_id
             link = deep_link(session_id)
+            launch_state = str(launch.get("state") or session.get("state") or "queued")
+            launch_note = str(launch.get("notes") or launch.get("error") or session.get("notes") or "")
             await update.message.reply_text(
                 "Тестовая сессия создана.\n"
                 f"Агент: {agent.label}\n"
                 f"Модель: {agent.hf_model}\n"
                 f"Session: {session_id}\n"
                 f"Ссылка на тест: {link}\n\n"
+                f"Статус запуска: {launch_state}\n"
+                f"{launch_note}\n\n"
                 "Открой ссылку в Telegram, чтобы продолжить тестирование в отдельной сессии."
             )
             return
