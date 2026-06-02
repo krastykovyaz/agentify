@@ -55,6 +55,10 @@ def infer_style(text: str) -> str:
     return "universal"
 
 
+def is_enabled_env(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def ask_qa_style_ratio(base_url: str, texts: List[str]) -> dict | None:
     sample = "\n\n---\n\n".join(texts[:40])
     system = (
@@ -418,7 +422,10 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await tg_file.download_to_drive(str(local_path))
 
     await update.message.reply_text(f"Файл принят: {local_name}. Анализирую...")
-    await update.message.reply_text("Анализирую стиль и распределение, это может занять немного времени...")
+    if is_enabled_env("VALIDATE_DATASET_NOLLM", "0"):
+        await update.message.reply_text("Быстрый режим анализа: без LLM, только эвристики.")
+    else:
+        await update.message.reply_text("Анализирую стиль и распределение, это может занять немного времени...")
 
     try:
         texts = read_texts(local_path)
@@ -426,9 +433,10 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         styles = []
         agree_n = 0
         agent_failed_n = 0
-        qa_ratio = ask_qa_style_ratio(base_url, texts[:STYLE_SAMPLE_LIMIT])
+        no_llm = is_enabled_env("VALIDATE_DATASET_NOLLM", "0")
+        qa_ratio = None if no_llm else ask_qa_style_ratio(base_url, texts[:STYLE_SAMPLE_LIMIT])
         # Use the universal agent only on a bounded sample to keep the bot responsive.
-        sample_n = min(len(texts), STYLE_SAMPLE_LIMIT)
+        sample_n = 0 if no_llm else min(len(texts), STYLE_SAMPLE_LIMIT)
         for i, t in enumerate(texts):
             if i < sample_n:
                 final_style, agent_style, heuristic_style, agreed = classify_style_with_consensus(base_url, t)
