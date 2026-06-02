@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "required": ["session_id", "agent_name", "hf_model", "created_at", "idle_timeout_sec"],
+  "properties": {
+    "session_id": { "type": "string" },
+    "agent_name": { "type": "string" },
+    "hf_model": { "type": "string" },
+    "created_at": { "type": "string" },
+    "idle_timeout_sec": { "type": "integer" },
+    "callback_url": { "type": "string" },
+    "user_id": { "type": "integer" },
+    "chat_id": { "type": "integer" }
+  }
+}
