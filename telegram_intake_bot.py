@@ -532,11 +532,15 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         test_link = ""
                 except Exception as e:
                     logger.warning("test session creation failed: %s", e)
+            lines = [
+                "Готово!",
+                f"Ссылка на агента: {hf_link}",
+            ]
+            if test_link:
+                lines.append(f"Ссылка на тест-бота: {test_link}")
+            lines.append(f"Тестировать можно здесь: {test_hint}")
             await q.message.reply_text(
-                "Готово!\n"
-                f"Ссылка на агента: {hf_link}\n"
-                f"{('Ссылка на тест-бота: ' + test_link + '\\n') if test_link else ''}"
-                f"Тестировать можно здесь: {test_hint}"
+                "\n".join(lines)
             )
             return
 
