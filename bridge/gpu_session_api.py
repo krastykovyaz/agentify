@@ -4,6 +4,9 @@ from __future__ import annotations
 import json
 import os
 import uuid
+import shutil
+import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 import shlex
@@ -16,6 +19,7 @@ import requests
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from huggingface_hub import snapshot_download
 
 
 class SessionCreate(BaseModel):
@@ -41,6 +45,7 @@ class SessionStatus(BaseModel):
     callback_url: str | None = None
     runtime_url: str | None = None
     notes: str | None = None
+    last_activity_at: str | None = None
 
 
 class TrainJobCreate(BaseModel):
@@ -77,8 +82,11 @@ app = FastAPI(title="Agentify GPU Session API", version="0.1.0")
 ROOT = Path(os.getenv("AGENTIFY_ROOT", Path(__file__).resolve().parent.parent)).resolve()
 SESSIONS_DIR = Path(os.getenv("GPU_SESSION_DIR", str(ROOT / "runs" / "sessions"))).resolve()
 JOBS_DIR = Path(os.getenv("GPU_TRAIN_JOBS_DIR", str(ROOT / "runs" / "train_jobs"))).resolve()
+MODEL_CACHE_DIR = Path(os.getenv("GPU_MODEL_CACHE_DIR", str(ROOT / "runs" / "hf_cache"))).resolve()
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_cleanup_stop = threading.Event()
 
 
 def _gpu_free_mb() -> int | None:
@@ -118,6 +126,18 @@ def _job_artifacts_dir(job_id: str) -> Path:
     return p
 
 
+def _session_artifacts_dir(session_id: str) -> Path:
+    p = ROOT / "runs" / "session_artifacts" / session_id
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _session_model_dir(session_id: str) -> Path:
+    p = _session_artifacts_dir(session_id) / "model"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def _write_session(data: dict) -> None:
     _session_path(data["session_id"]).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -127,6 +147,143 @@ def _read_session(session_id: str) -> dict:
     if not p.exists():
         raise HTTPException(status_code=404, detail="session not found")
     return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _parse_repo_id(hf_model: str) -> str:
+    hf_model = (hf_model or "").strip()
+    if hf_model.startswith("https://huggingface.co/"):
+        hf_model = hf_model[len("https://huggingface.co/") :]
+    hf_model = hf_model.strip("/")
+    return hf_model
+
+
+def _cleanup_session_artifacts(session_id: str) -> None:
+    art = ROOT / "runs" / "session_artifacts" / session_id
+    if art.exists():
+        shutil.rmtree(art, ignore_errors=True)
+
+
+def _cleanup_session_record(session_id: str) -> None:
+    try:
+        _session_path(session_id).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _cleanup_session_bundle(session_id: str) -> None:
+    _cleanup_session_artifacts(session_id)
+    _cleanup_session_record(session_id)
+
+
+def _cleanup_previous_sessions(chat_id: int | None) -> None:
+    if chat_id is None:
+        return
+    for p in SESSIONS_DIR.glob("*.json"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("chat_id") == chat_id:
+            _cleanup_session_bundle(str(data.get("session_id") or p.stem))
+
+
+def _touch_session(data: dict) -> None:
+    data["last_activity_at"] = datetime.now(timezone.utc).isoformat()
+    _write_session(data)
+
+
+def _session_expired(data: dict) -> bool:
+    last = str(data.get("last_activity_at") or data.get("created_at") or "").strip()
+    if not last:
+        return False
+    try:
+        dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+    except Exception:
+        return False
+    idle = int(data.get("idle_timeout_sec") or 900)
+    return (datetime.now(timezone.utc) - dt).total_seconds() > idle
+
+
+def _expire_session_if_needed(data: dict) -> bool:
+    if not _session_expired(data):
+        return False
+    session_id = str(data.get("session_id") or "")
+    if session_id:
+        _cleanup_session_bundle(session_id)
+    data["state"] = "stopped"
+    data["notes"] = "session expired and artifacts cleaned"
+    _write_session(data)
+    return True
+
+
+def _download_hf_model(repo_id_or_url: str, session_id: str) -> Path:
+    repo_id = _parse_repo_id(repo_id_or_url)
+    cache_dir = MODEL_CACHE_DIR / repo_id.replace("/", "__")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    token = (os.getenv("HF_TOKEN") or "").strip() or None
+    path = snapshot_download(
+        repo_id=repo_id,
+        repo_type="model",
+        local_dir=str(cache_dir),
+        local_dir_use_symlinks=False,
+        token=token,
+        allow_patterns=["*.gguf", "*.json", "*.txt", "*.md"],
+    )
+    files = sorted(Path(path).rglob("*.gguf"))
+    if not files:
+        raise RuntimeError(f"no gguf found in {repo_id}")
+    art = _session_model_dir(session_id)
+    local = art / files[0].name
+    shutil.copy2(files[0], local)
+    return local
+
+
+def _download_hf_artifacts(repo_id_or_url: str, session_id: str) -> dict:
+    repo_id = _parse_repo_id(repo_id_or_url)
+    cache_dir = MODEL_CACHE_DIR / repo_id.replace("/", "__")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    token = (os.getenv("HF_TOKEN") or "").strip() or None
+    path = snapshot_download(
+        repo_id=repo_id,
+        repo_type="model",
+        local_dir=str(cache_dir),
+        local_dir_use_symlinks=False,
+        token=token,
+    )
+    model_files = sorted(Path(path).rglob("*.gguf"))
+    if not model_files:
+        raise RuntimeError(f"no gguf found in {repo_id}")
+    session_dir = _session_model_dir(session_id)
+    copied: list[str] = []
+    for src in model_files:
+        dst = session_dir / src.name
+        shutil.copy2(src, dst)
+        copied.append(str(dst))
+    return {
+        "repo_id": repo_id,
+        "cache_dir": str(cache_dir),
+        "session_dir": str(session_dir),
+        "model_files": copied,
+        "primary_model": copied[0] if copied else None,
+    }
+
+
+def _reply_via_local_gguf(model_path: Path, prompt: str) -> str:
+    try:
+        from llama_cpp import Llama  # type: ignore
+
+        llm = Llama(model_path=str(model_path), n_ctx=8192, n_gpu_layers=-1, verbose=False)
+        out = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": "Отвечай кратко и по делу."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            top_p=0.9,
+        )
+        return (out.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+    except Exception as e:
+        return f"[stub reply] local gguf model unavailable: {e}"
 
 
 def _write_job(data: dict) -> None:
@@ -187,6 +344,39 @@ def _gpu_ready() -> tuple[bool, str]:
     return ok, why
 
 
+def _cleanup_expired_sessions_once() -> None:
+    for p in SESSIONS_DIR.glob("*.json"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        try:
+            if _session_expired(data):
+                _cleanup_session_bundle(str(data.get("session_id") or p.stem))
+                data["state"] = "stopped"
+                data["notes"] = "session expired and artifacts cleaned"
+                _write_session(data)
+        except Exception:
+            continue
+
+
+def _cleanup_worker() -> None:
+    while not _cleanup_stop.is_set():
+        try:
+            _cleanup_expired_sessions_once()
+        except Exception:
+            pass
+        _cleanup_stop.wait(timeout=60)
+
+
+@app.on_event("startup")
+def _startup_cleanup_worker():
+    if not getattr(app.state, "cleanup_worker_started", False):
+        app.state.cleanup_worker_started = True
+        t = threading.Thread(target=_cleanup_worker, daemon=True)
+        t.start()
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "service": "gpu-session-api"}
@@ -194,6 +384,7 @@ def health():
 
 @app.post("/v1/sessions", response_model=SessionStatus)
 def create_session(payload: SessionCreate):
+    _cleanup_previous_sessions(payload.chat_id)
     session_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
     data = {
@@ -209,6 +400,7 @@ def create_session(payload: SessionCreate):
         "callback_url": payload.callback_url,
         "runtime_url": None,
         "notes": "session accepted; runtime launch not implemented yet",
+        "last_activity_at": now,
     }
     _write_session(data)
     return data
@@ -216,21 +408,36 @@ def create_session(payload: SessionCreate):
 
 @app.get("/v1/sessions/{session_id}", response_model=SessionStatus)
 def get_session(session_id: str):
-    return _read_session(session_id)
+    data = _read_session(session_id)
+    if _expire_session_if_needed(data):
+        return data
+    return data
 
 
 @app.post("/v1/sessions/{session_id}/launch", response_model=SessionStatus)
 def launch_session(session_id: str):
     data = _read_session(session_id)
+    if _expire_session_if_needed(data):
+        raise HTTPException(status_code=409, detail="session expired")
     ok, why = _can_launch()
     if not ok:
         data["state"] = "queued"
         data["notes"] = why
         _write_session(data)
         raise HTTPException(status_code=409, detail=why)
+    repo_or_url = str(data.get("hf_model") or "").strip()
+    if repo_or_url.startswith("https://huggingface.co/") or "/" in repo_or_url:
+        try:
+            hf_info = _download_hf_artifacts(repo_or_url, session_id)
+            data["runtime_model"] = str(hf_info["primary_model"])
+            data["notes"] = f"downloaded {len(hf_info['model_files'])} model file(s)"
+        except Exception as e:
+            data["notes"] = f"hf download failed: {e}"
+            _write_session(data)
+            raise HTTPException(status_code=500, detail=f"hf download failed: {e}")
     data["state"] = "running"
-    data["runtime_url"] = data.get("runtime_url") or f"http://localhost:8000/sessions/{session_id}"
-    data["notes"] = "placeholder launch; integrate Docker/HF download next"
+    data["runtime_url"] = data.get("runtime_url") or f"local://{session_id}"
+    data["last_activity_at"] = datetime.now(timezone.utc).isoformat()
     _write_session(data)
     return data
 
@@ -240,6 +447,7 @@ def stop_session(session_id: str):
     data = _read_session(session_id)
     data["state"] = "stopped"
     data["notes"] = "session stopped"
+    _cleanup_session_bundle(session_id)
     _write_session(data)
     return data
 
@@ -250,37 +458,42 @@ def reply_session(session_id: str, payload: dict):
     user_text = str(payload.get("text") or "").strip()
     if not user_text:
         raise HTTPException(status_code=400, detail="text is required")
+    if _expire_session_if_needed(data):
+        raise HTTPException(status_code=409, detail="session expired")
 
     if data.get("state") != "running":
         data["state"] = "running"
-        _write_session(data)
+        _touch_session(data)
 
-    ollama_url = os.getenv("GPU_OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
     model = str(data.get("runtime_model") or data.get("hf_model") or "").strip()
-    system = (
-        f"Ты тестовый агент {data.get('agent_name')}. "
-        "Отвечай по задаче пользователя кратко и по делу."
-    )
     try:
-        r = requests.post(
-            ollama_url + "/api/chat",
-            json={
-                "model": model,
-                "stream": False,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_text},
-                ],
-                "options": {"temperature": 0.2, "top_p": 0.9, "num_ctx": 8192},
-            },
-            timeout=120,
-        )
-        r.raise_for_status()
-        content = (r.json().get("message") or {}).get("content", "").strip()
+        if model.endswith(".gguf") and Path(model).exists():
+            content = _reply_via_local_gguf(Path(model), user_text)
+        else:
+            ollama_url = os.getenv("GPU_OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+            system = (
+                f"Ты тестовый агент {data.get('agent_name')}. "
+                "Отвечай по задаче пользователя кратко и по делу."
+            )
+            r = requests.post(
+                ollama_url + "/api/chat",
+                json={
+                    "model": model,
+                    "stream": False,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user_text},
+                    ],
+                    "options": {"temperature": 0.2, "top_p": 0.9, "num_ctx": 8192},
+                },
+                timeout=120,
+            )
+            r.raise_for_status()
+            content = (r.json().get("message") or {}).get("content", "").strip()
         if not content:
             raise RuntimeError("empty model response")
         data["notes"] = "reply served via ollama"
-        _write_session(data)
+        _touch_session(data)
         return {"session_id": session_id, "reply": content, "model": model, "state": data["state"]}
     except Exception as e:
         fallback = (
