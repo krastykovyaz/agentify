@@ -199,13 +199,42 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 int(context.application.bot_data["idle_timeout_sec"]),
             )
             session_id = session["session_id"]
-            launch = await asyncio.to_thread(launch_gpu_session, api_url, session_id)
             context.chat_data["session_id"] = session_id
+
+            # Try to launch and wait until model is downloaded (with timeout)
+            launch = await asyncio.to_thread(launch_gpu_session, api_url, session_id)
             link = deep_link(session_id)
             launch_state = str(launch.get("state") or session.get("state") or "queued")
             launch_note = str(launch.get("notes") or launch.get("error") or session.get("notes") or "")
+
+            # If queued or download in progress, poll status for up to 60s
+            if launch_state != "running":
+                await update.message.reply_text(
+                    "Сессия создана и запуск в процессе. Ожидаю готовности модели (до 60s)..."
+                )
+                ready = False
+                for _ in range(30):
+                    await asyncio.sleep(2)
+                    try:
+                        status = await asyncio.to_thread(get_gpu_session, api_url, session_id)
+                    except Exception:
+                        status = {}
+                    state = str(status.get("state") or "")
+                    notes = str(status.get("notes") or "")
+                    runtime_model = str(status.get("runtime_model") or "")
+                    if "downloaded" in notes or runtime_model.endswith(".gguf") or state == "running":
+                        ready = True
+                        launch_state = state or "running"
+                        launch_note = notes
+                        break
+                if not ready:
+                    await update.message.reply_text(
+                        f"Модель не готова: статус {launch_state}. Примечание: {launch_note}"
+                    )
+                    return
+
             await update.message.reply_text(
-                "Тестовая сессия создана.\n"
+                "Тестовая сессия создана и готова.\n"
                 f"Агент: {agent.label}\n"
                 f"Модель: {agent.hf_model}\n"
                 f"Session: {session_id}\n"
