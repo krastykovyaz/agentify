@@ -165,6 +165,19 @@ def _normalize_cmd_paths(cmd: str) -> str:
     return cmd
 
 
+def _normalize_job_cmd(cmd: str, data: dict) -> str:
+    cmd = _normalize_cmd_paths(cmd)
+    source_dataset = str(data.get("source_dataset_csv") or "")
+    source_report = str(data.get("source_report_json") or "")
+    local_dataset = str(data.get("dataset_csv") or "")
+    local_report = str(data.get("report_json") or "")
+    if source_dataset and local_dataset:
+        cmd = cmd.replace(source_dataset, local_dataset)
+    if source_report and local_report:
+        cmd = cmd.replace(source_report, local_report)
+    return cmd
+
+
 def _gpu_ready() -> tuple[bool, str]:
     ok, why = _can_launch()
     return ok, why
@@ -283,6 +296,8 @@ def create_train_job(payload: TrainJobCreate):
         "created_at": now,
         "dataset_csv": payload.dataset_csv,
         "report_json": payload.report_json,
+        "source_dataset_csv": payload.dataset_csv,
+        "source_report_json": payload.report_json,
         "train_cmd": payload.train_cmd,
         "publish_cmd": payload.publish_cmd,
         "workdir": payload.workdir,
@@ -344,6 +359,8 @@ def run_train_job(job_id: str):
 
     train_cmd = str(data["train_cmd"])
     publish_cmd = str(data["publish_cmd"])
+    train_cmd = _normalize_job_cmd(train_cmd, data)
+    publish_cmd = _normalize_job_cmd(publish_cmd, data)
 
     code, log = _run_subprocess(train_cmd, cwd=workdir)
     if code != 0:
