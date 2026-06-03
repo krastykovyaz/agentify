@@ -357,6 +357,8 @@ def run_train_job(job_id: str):
     workdir = Path(workdir_raw).resolve() if workdir_raw else ROOT
     if not workdir.exists():
         workdir = ROOT
+    outdir = Path(str((JOBS_DIR / str(data.get("job_id") or "") / "model_out"))).resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
     data["state"] = "running"
     data["notes"] = "training"
     _write_job(data)
@@ -365,6 +367,8 @@ def run_train_job(job_id: str):
     publish_cmd = str(data["publish_cmd"])
     train_cmd = _normalize_job_cmd(train_cmd, data)
     publish_cmd = _normalize_job_cmd(publish_cmd, data)
+    train_cmd = train_cmd.replace("__GPU_OUTDIR__", str(outdir))
+    publish_cmd = publish_cmd.replace("__GPU_OUTDIR__", str(outdir))
 
     code, log = _run_subprocess(train_cmd, cwd=workdir)
     if code != 0:

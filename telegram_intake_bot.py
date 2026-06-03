@@ -575,7 +575,11 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"python3 {{ROOT}}/pipeline/publish_run_to_hf.py "
                     f"--outdir {{OUTDIR}} --run-id {flow['run_id']} --dataset {{DATASET}} --report {{REPORT}}"
                 )
-                cmd_gpu = cmd.replace(str(ds_csv), "__GPU_DATASET__").replace(str(ds_report), "__GPU_REPORT__")
+                cmd_gpu = (
+                    cmd.replace(str(ds_csv), "__GPU_DATASET__")
+                    .replace(str(ds_report), "__GPU_REPORT__")
+                    .replace(str(outdir), "__GPU_OUTDIR__")
+                )
                 publish_gpu = (
                     publish_cmd
                     .replace("{ROOT}", str(root))
