@@ -575,14 +575,22 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"python3 {{ROOT}}/pipeline/publish_run_to_hf.py "
                     f"--outdir {{OUTDIR}} --run-id {flow['run_id']} --dataset {{DATASET}} --report {{REPORT}}"
                 )
+                cmd_gpu = cmd.replace(str(ds_csv), "__GPU_DATASET__").replace(str(ds_report), "__GPU_REPORT__")
+                publish_gpu = (
+                    publish_cmd
+                    .replace("{ROOT}", str(root))
+                    .replace("{OUTDIR}", "__GPU_OUTDIR__")
+                    .replace("{DATASET}", "__GPU_DATASET__")
+                    .replace("{REPORT}", "__GPU_REPORT__")
+                )
                 train_job = await asyncio.to_thread(
                     create_train_job,
                     gpu_api,
                     flow["run_id"],
                     ds_csv,
                     ds_report,
-                    cmd,
-                    publish_cmd.replace("{ROOT}", str(root)).replace("{OUTDIR}", str(outdir)).replace("{DATASET}", str(ds_csv)).replace("{REPORT}", str(ds_report)),
+                    cmd_gpu,
+                    publish_gpu,
                     None,
                     q.message.chat_id,
                     int(os.getenv("TEST_SESSION_IDLE_SEC", "900")),

@@ -171,10 +171,14 @@ def _normalize_job_cmd(cmd: str, data: dict) -> str:
     source_report = str(data.get("source_report_json") or "")
     local_dataset = str(data.get("dataset_csv") or "")
     local_report = str(data.get("report_json") or "")
+    local_outdir = str((JOBS_DIR / str(data.get("job_id") or "") / "model_out").resolve())
     if source_dataset and local_dataset:
         cmd = cmd.replace(source_dataset, local_dataset)
     if source_report and local_report:
         cmd = cmd.replace(source_report, local_report)
+    cmd = cmd.replace("__GPU_DATASET__", local_dataset or source_dataset)
+    cmd = cmd.replace("__GPU_REPORT__", local_report or source_report)
+    cmd = cmd.replace("__GPU_OUTDIR__", local_outdir)
     return cmd
 
 
