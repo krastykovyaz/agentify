@@ -356,6 +356,17 @@ def create_test_session(api_url: str, agent_name: str, hf_model: str, chat_id: i
     return r.json()
 
 
+def launch_test_session(api_url: str, session_id: str) -> dict:
+    r = requests.post(api_url.rstrip("/") + f"/v1/sessions/{session_id}/launch", timeout=600)
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail", r.text)
+        except Exception:
+            detail = r.text
+        return {"error": detail, "status_code": r.status_code}
+    return r.json()
+
+
 def create_train_job(
     api_url: str,
     run_id: str,
@@ -621,7 +632,12 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         q.message.chat_id,
                         int(os.getenv("TEST_SESSION_IDLE_SEC", "900")),
                     )
-                    test_link = build_test_bot_link(str(session.get("session_id", "")))
+                    session_id = str(session.get("session_id") or "")
+                    if session_id:
+                        launch = await asyncio.to_thread(launch_test_session, gpu_api, session_id)
+                        if launch.get("error"):
+                            logger.warning("test session launch failed: %s", launch.get("error"))
+                    test_link = build_test_bot_link(session_id)
                     if test_link.startswith("session:"):
                         test_link = ""
                 except Exception as e:

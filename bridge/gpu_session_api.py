@@ -344,6 +344,47 @@ def _gpu_ready() -> tuple[bool, str]:
     return ok, why
 
 
+def _runtime_model_ready(data: dict) -> bool:
+    model = str(data.get("runtime_model") or "").strip()
+    return model.endswith(".gguf") and Path(model).exists()
+
+
+def _ensure_session_launched(data: dict) -> dict:
+    if _runtime_model_ready(data):
+        if data.get("state") != "running":
+            data["state"] = "running"
+            _touch_session(data)
+        return data
+
+    ok, why = _can_launch()
+    if not ok:
+        data["state"] = "queued"
+        data["notes"] = why
+        _write_session(data)
+        raise HTTPException(status_code=409, detail=why)
+
+    session_id = str(data.get("session_id") or "")
+    repo_or_url = str(data.get("hf_model") or "").strip()
+    if not repo_or_url:
+        raise HTTPException(status_code=400, detail="hf_model is missing")
+
+    if repo_or_url.startswith("https://huggingface.co/") or "/" in repo_or_url:
+        try:
+            hf_info = _download_hf_artifacts(repo_or_url, session_id)
+            data["runtime_model"] = str(hf_info["primary_model"])
+            data["notes"] = f"downloaded {len(hf_info['model_files'])} model file(s)"
+        except Exception as e:
+            data["notes"] = f"hf download failed: {e}"
+            _write_session(data)
+            raise HTTPException(status_code=500, detail=f"hf download failed: {e}") from e
+
+    data["state"] = "running"
+    data["runtime_url"] = data.get("runtime_url") or f"local://{session_id}"
+    data["last_activity_at"] = datetime.now(timezone.utc).isoformat()
+    _write_session(data)
+    return data
+
+
 def _cleanup_expired_sessions_once() -> None:
     for p in SESSIONS_DIR.glob("*.json"):
         try:
@@ -399,7 +440,7 @@ def create_session(payload: SessionCreate):
         "chat_id": payload.chat_id,
         "callback_url": payload.callback_url,
         "runtime_url": None,
-        "notes": "session accepted; runtime launch not implemented yet",
+        "notes": "session accepted; call /launch or send /reply to download model",
         "last_activity_at": now,
     }
     _write_session(data)
@@ -419,27 +460,7 @@ def launch_session(session_id: str):
     data = _read_session(session_id)
     if _expire_session_if_needed(data):
         raise HTTPException(status_code=409, detail="session expired")
-    ok, why = _can_launch()
-    if not ok:
-        data["state"] = "queued"
-        data["notes"] = why
-        _write_session(data)
-        raise HTTPException(status_code=409, detail=why)
-    repo_or_url = str(data.get("hf_model") or "").strip()
-    if repo_or_url.startswith("https://huggingface.co/") or "/" in repo_or_url:
-        try:
-            hf_info = _download_hf_artifacts(repo_or_url, session_id)
-            data["runtime_model"] = str(hf_info["primary_model"])
-            data["notes"] = f"downloaded {len(hf_info['model_files'])} model file(s)"
-        except Exception as e:
-            data["notes"] = f"hf download failed: {e}"
-            _write_session(data)
-            raise HTTPException(status_code=500, detail=f"hf download failed: {e}")
-    data["state"] = "running"
-    data["runtime_url"] = data.get("runtime_url") or f"local://{session_id}"
-    data["last_activity_at"] = datetime.now(timezone.utc).isoformat()
-    _write_session(data)
-    return data
+    return _ensure_session_launched(data)
 
 
 @app.post("/v1/sessions/{session_id}/stop", response_model=SessionStatus)
@@ -461,14 +482,14 @@ def reply_session(session_id: str, payload: dict):
     if _expire_session_if_needed(data):
         raise HTTPException(status_code=409, detail="session expired")
 
-    if data.get("state") != "running":
-        data["state"] = "running"
-        _touch_session(data)
+    if not _runtime_model_ready(data):
+        data = _ensure_session_launched(data)
 
     model = str(data.get("runtime_model") or data.get("hf_model") or "").strip()
     try:
         if model.endswith(".gguf") and Path(model).exists():
             content = _reply_via_local_gguf(Path(model), user_text)
+            data["notes"] = "reply served via local gguf"
         else:
             ollama_url = os.getenv("GPU_OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
             system = (
@@ -492,7 +513,6 @@ def reply_session(session_id: str, payload: dict):
             content = (r.json().get("message") or {}).get("content", "").strip()
         if not content:
             raise RuntimeError("empty model response")
-        data["notes"] = "reply served via ollama"
         _touch_session(data)
         return {"session_id": session_id, "reply": content, "model": model, "state": data["state"]}
     except Exception as e:

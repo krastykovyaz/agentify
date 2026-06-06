@@ -94,7 +94,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Session: {session_id}\n"
                     f"Агент: {session.get('agent_name')}\n"
                     f"Модель: {session.get('hf_model')}\n"
-                    "Теперь отправь текст, и я передам его в GPU API."
+                    "Скачиваю модель с Hugging Face, подожди..."
+                )
+                ready, status = await ensure_session_ready(update, api_url, session_id)
+                if not ready:
+                    return
+                runtime_model = str(status.get("runtime_model") or session.get("runtime_model") or "")
+                await update.message.reply_text(
+                    "Модель готова. Отправь текст, и я передам его в GPU API.\n"
+                    f"Runtime: {runtime_model}"
                 )
                 return
             except Exception as e:
@@ -154,7 +162,7 @@ def reply_gpu_session(api_url: str, session_id: str, text: str) -> dict:
     r = requests.post(
         api_url.rstrip("/") + f"/v1/sessions/{session_id}/reply",
         json={"text": text},
-        timeout=180,
+        timeout=600,
     )
     r.raise_for_status()
     return r.json()
@@ -167,7 +175,7 @@ def get_gpu_session(api_url: str, session_id: str) -> dict:
 
 
 def launch_gpu_session(api_url: str, session_id: str) -> dict:
-    r = requests.post(api_url.rstrip("/") + f"/v1/sessions/{session_id}/launch", timeout=30)
+    r = requests.post(api_url.rstrip("/") + f"/v1/sessions/{session_id}/launch", timeout=600)
     if r.status_code >= 400:
         try:
             detail = r.json().get("detail", r.text)
@@ -175,6 +183,44 @@ def launch_gpu_session(api_url: str, session_id: str) -> dict:
             detail = r.text
         return {"error": detail, "status_code": r.status_code}
     return r.json()
+
+
+async def wait_for_session_ready(api_url: str, session_id: str, timeout_sec: int = 300) -> tuple[bool, dict]:
+    deadline = asyncio.get_event_loop().time() + timeout_sec
+    last_status: dict = {}
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            last_status = await asyncio.to_thread(get_gpu_session, api_url, session_id)
+        except Exception:
+            last_status = {}
+        notes = str(last_status.get("notes") or "")
+        runtime_model = str(last_status.get("runtime_model") or "")
+        state = str(last_status.get("state") or "")
+        if runtime_model.endswith(".gguf") or "downloaded" in notes:
+            return True, last_status
+        await asyncio.sleep(2)
+    return False, last_status
+
+
+async def ensure_session_ready(update: Update, api_url: str, session_id: str) -> tuple[bool, dict]:
+    launch = await asyncio.to_thread(launch_gpu_session, api_url, session_id)
+    if launch.get("error"):
+        await update.message.reply_text(
+            f"Не удалось запустить сессию: {launch.get('error')}\n"
+            "Проверь, что на GPU-сервере обновлён bridge/gpu_session_api.py."
+        )
+        return False, launch
+
+    ready, status = await wait_for_session_ready(api_url, session_id)
+    if not ready:
+        state = str(status.get("state") or launch.get("state") or "unknown")
+        notes = str(status.get("notes") or launch.get("notes") or "")
+        await update.message.reply_text(
+            f"Модель ещё не готова (статус: {state}).\n{notes}\n"
+            "Подожди минуту и отправь сообщение снова."
+        )
+        return False, status
+    return True, status
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,7 +268,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     state = str(status.get("state") or "")
                     notes = str(status.get("notes") or "")
                     runtime_model = str(status.get("runtime_model") or "")
-                    if "downloaded" in notes or runtime_model.endswith(".gguf") or state == "running":
+                    if "downloaded" in notes or runtime_model.endswith(".gguf"):
                         ready = True
                         launch_state = state or "running"
                         launch_note = notes
@@ -245,14 +291,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        ready, _ = await ensure_session_ready(update, api_url, session_id)
+        if not ready:
+            return
+
         reply = await asyncio.to_thread(reply_gpu_session, api_url, session_id, update.message.text)
         text = str(reply.get("reply") or "").strip()
         model = str(reply.get("model") or agent.hf_model)
+        if text.startswith("[stub reply]"):
+            await update.message.reply_text(
+                f"Модель не ответила.\n{text}\n\n"
+                "Перезапусти на GPU: python3 bridge/gpu_session_api.py"
+            )
+            return
         await update.message.reply_text(
             f"[{agent.label}]\nМодель: {model}\n\n{text}"
         )
     except Exception as e:
-        await update.message.reply_text(f"Не удалось создать тестовую сессию: {e}")
+        await update.message.reply_text(f"Ошибка тестовой сессии: {e}")
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
