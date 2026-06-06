@@ -238,6 +238,65 @@ def _download_hf_model(repo_id_or_url: str, session_id: str) -> Path:
     return local
 
 
+def _default_gguf_quant() -> str:
+    return os.getenv("GPU_GGUF_QUANT", "Q4_K_M").strip() or "Q4_K_M"
+
+
+def _find_lora_adapter_dir(repo_path: Path) -> Path | None:
+    if (repo_path / "adapter_config.json").exists() and (
+        (repo_path / "adapter_model.safetensors").exists() or (repo_path / "adapter_model.bin").exists()
+    ):
+        return repo_path
+    for cfg in sorted(repo_path.rglob("adapter_config.json")):
+        parent = cfg.parent
+        if (parent / "adapter_model.safetensors").exists() or (parent / "adapter_model.bin").exists():
+            return parent
+    return None
+
+
+def _lora_base_model(adapter_dir: Path) -> str:
+    try:
+        cfg = json.loads((adapter_dir / "adapter_config.json").read_text(encoding="utf-8"))
+        base = str(cfg.get("base_model_name_or_path") or "").strip()
+        if base:
+            return base
+    except Exception:
+        pass
+    return os.getenv("GPU_BASE_MODEL", "google/gemma-4-E2B-it").strip() or "google/gemma-4-E2B-it"
+
+
+def _convert_lora_to_gguf(adapter_dir: Path, session_id: str) -> Path:
+    quant = _default_gguf_quant()
+    build_script = ROOT / "build_gemma_gguf.sh"
+    if not build_script.exists():
+        raise RuntimeError(f"build script not found: {build_script}")
+    base_model = _lora_base_model(adapter_dir)
+    cmd = [
+        "bash",
+        str(build_script),
+        str(adapter_dir.resolve()),
+        quant,
+        base_model,
+    ]
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    out, _ = proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"lora to gguf conversion failed: {(out or '')[-2000:]}")
+    gguf = ROOT / "artifacts" / f"{adapter_dir.name}-{quant}.gguf"
+    if not gguf.exists():
+        raise RuntimeError(f"expected gguf not found after build: {gguf}")
+    session_dir = _session_model_dir(session_id)
+    dst = session_dir / gguf.name
+    shutil.copy2(gguf, dst)
+    return dst
+
+
 def _download_hf_artifacts(repo_id_or_url: str, session_id: str) -> dict:
     repo_id = _parse_repo_id(repo_id_or_url)
     cache_dir = MODEL_CACHE_DIR / repo_id.replace("/", "__")
@@ -250,21 +309,33 @@ def _download_hf_artifacts(repo_id_or_url: str, session_id: str) -> dict:
         local_dir_use_symlinks=False,
         token=token,
     )
-    model_files = sorted(Path(path).rglob("*.gguf"))
-    if not model_files:
-        raise RuntimeError(f"no gguf found in {repo_id}")
+    repo_path = Path(path)
     session_dir = _session_model_dir(session_id)
+    model_files = sorted(repo_path.rglob("*.gguf"))
+    converted_from_lora = False
+    if not model_files:
+        adapter_dir = _find_lora_adapter_dir(repo_path)
+        if adapter_dir is None:
+            raise RuntimeError(f"no gguf or lora adapter found in {repo_id}")
+        built = _convert_lora_to_gguf(adapter_dir, session_id)
+        model_files = [built]
+        converted_from_lora = True
     copied: list[str] = []
     for src in model_files:
         dst = session_dir / src.name
-        shutil.copy2(src, dst)
+        if src.resolve() != dst.resolve():
+            shutil.copy2(src, dst)
         copied.append(str(dst))
+    notes = f"downloaded {len(copied)} model file(s)"
+    if converted_from_lora:
+        notes = f"converted lora adapter to gguf ({len(copied)} file(s))"
     return {
         "repo_id": repo_id,
         "cache_dir": str(cache_dir),
         "session_dir": str(session_dir),
         "model_files": copied,
         "primary_model": copied[0] if copied else None,
+        "notes": notes,
     }
 
 
@@ -372,7 +443,7 @@ def _ensure_session_launched(data: dict) -> dict:
         try:
             hf_info = _download_hf_artifacts(repo_or_url, session_id)
             data["runtime_model"] = str(hf_info["primary_model"])
-            data["notes"] = f"downloaded {len(hf_info['model_files'])} model file(s)"
+            data["notes"] = str(hf_info.get("notes") or f"downloaded {len(hf_info['model_files'])} model file(s)")
         except Exception as e:
             data["notes"] = f"hf download failed: {e}"
             _write_session(data)

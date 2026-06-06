@@ -2,11 +2,55 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import subprocess
+import shutil
 from pathlib import Path
 
 from dotenv import load_dotenv
 from huggingface_hub import HfApi, upload_folder
+
+
+def _lora_base_model(outdir: Path) -> str:
+    try:
+        cfg = json.loads((outdir / "adapter_config.json").read_text(encoding="utf-8"))
+        base = str(cfg.get("base_model_name_or_path") or "").strip()
+        if base:
+            return base
+    except Exception:
+        pass
+    return os.getenv("GPU_BASE_MODEL", "google/gemma-4-E2B-it").strip() or "google/gemma-4-E2B-it"
+
+
+def maybe_build_gguf(outdir: Path, root: Path) -> Path | None:
+    if os.getenv("SKIP_GGUF_BUILD", "0").strip() in {"1", "true", "yes"}:
+        return None
+    if not (outdir / "adapter_config.json").exists():
+        return None
+    if not (
+        (outdir / "adapter_model.safetensors").exists() or (outdir / "adapter_model.bin").exists()
+    ):
+        return None
+    script = root / "build_gemma_gguf.sh"
+    if not script.exists():
+        print(f"skip gguf build: {script} not found")
+        return None
+    quant = os.getenv("GPU_GGUF_QUANT", "Q4_K_M").strip() or "Q4_K_M"
+    base_model = _lora_base_model(outdir)
+    print(f"Building GGUF from LoRA: quant={quant} base={base_model}")
+    subprocess.run(
+        ["bash", str(script), str(outdir.resolve()), quant, base_model],
+        check=True,
+        cwd=str(root),
+    )
+    gguf = root / "artifacts" / f"{outdir.name}-{quant}.gguf"
+    if not gguf.exists():
+        raise RuntimeError(f"gguf build failed: {gguf}")
+    dest = outdir / gguf.name
+    shutil.copy2(gguf, dest)
+    print(f"GGUF ready: {dest}")
+    return dest
 
 
 def write_readme(outdir: Path, repo_id: str, run_id: str, dataset: str, report: str) -> None:
@@ -70,6 +114,9 @@ def main() -> None:
     api.create_repo(repo_id=repo_id, repo_type="model", private=args.private, exist_ok=True)
 
     write_readme(outdir, repo_id, safe_run, args.dataset, args.report)
+
+    root = Path(__file__).resolve().parent.parent
+    maybe_build_gguf(outdir, root)
 
     upload_folder(
         repo_id=repo_id,

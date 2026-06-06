@@ -196,7 +196,7 @@ async def wait_for_session_ready(api_url: str, session_id: str, timeout_sec: int
         notes = str(last_status.get("notes") or "")
         runtime_model = str(last_status.get("runtime_model") or "")
         state = str(last_status.get("state") or "")
-        if runtime_model.endswith(".gguf") or "downloaded" in notes:
+        if runtime_model.endswith(".gguf") or "downloaded" in notes or "converted" in notes:
             return True, last_status
         await asyncio.sleep(2)
     return False, last_status
@@ -268,7 +268,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     state = str(status.get("state") or "")
                     notes = str(status.get("notes") or "")
                     runtime_model = str(status.get("runtime_model") or "")
-                    if "downloaded" in notes or runtime_model.endswith(".gguf"):
+                    if "downloaded" in notes or "converted" in notes or runtime_model.endswith(".gguf"):
                         ready = True
                         launch_state = state or "running"
                         launch_note = notes
