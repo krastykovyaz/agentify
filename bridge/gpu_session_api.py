@@ -193,6 +193,9 @@ def _touch_session(data: dict) -> None:
 
 
 def _session_expired(data: dict) -> bool:
+    state = str(data.get("state") or "").strip()
+    if state == "provisioning":
+        return False
     last = str(data.get("last_activity_at") or data.get("created_at") or "").strip()
     if not last:
         return False
@@ -200,8 +203,14 @@ def _session_expired(data: dict) -> bool:
         dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
     except Exception:
         return False
+    elapsed = (datetime.now(timezone.utc) - dt).total_seconds()
+    if state == "queued":
+        queued_timeout = int(os.getenv("GPU_QUEUED_TIMEOUT_SEC", "86400"))
+        return elapsed > queued_timeout
+    if state != "running":
+        return False
     idle = int(data.get("idle_timeout_sec") or 900)
-    return (datetime.now(timezone.utc) - dt).total_seconds() > idle
+    return elapsed > idle
 
 
 def _expire_session_if_needed(data: dict) -> bool:
@@ -439,6 +448,10 @@ def _ensure_session_launched(data: dict) -> dict:
     if not repo_or_url:
         raise HTTPException(status_code=400, detail="hf_model is missing")
 
+    data["state"] = "provisioning"
+    data["notes"] = "downloading and preparing model"
+    _write_session(data)
+
     if repo_or_url.startswith("https://huggingface.co/") or "/" in repo_or_url:
         try:
             hf_info = _download_hf_artifacts(repo_or_url, session_id)
@@ -646,16 +659,20 @@ def get_train_job(job_id: str):
     return _read_job(job_id)
 
 
-@app.post("/v1/train-jobs/{job_id}/run", response_model=TrainJobStatus)
-def run_train_job(job_id: str):
+def _extract_hf_link(pub_log: str) -> str:
+    for line in reversed((pub_log or "").splitlines()):
+        line = line.strip()
+        if line.startswith("https://huggingface.co/"):
+            return line
+    return ""
+
+
+def _run_train_job_worker(job_id: str) -> None:
     load_dotenv()
-    data = _read_job(job_id)
-    ok, why = _gpu_ready()
-    if not ok:
-        data["state"] = "queued"
-        data["notes"] = why
-        _write_job(data)
-        raise HTTPException(status_code=409, detail=why)
+    try:
+        data = _read_job(job_id)
+    except HTTPException:
+        return
 
     workdir_raw = str(data.get("workdir") or "").strip()
     workdir = Path(workdir_raw).resolve() if workdir_raw else ROOT
@@ -663,9 +680,6 @@ def run_train_job(job_id: str):
         workdir = ROOT
     outdir = Path(str((JOBS_DIR / str(data.get("job_id") or "") / "model_out"))).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
-    data["state"] = "running"
-    data["notes"] = "training"
-    _write_job(data)
 
     train_cmd = str(data["train_cmd"])
     publish_cmd = str(data["publish_cmd"])
@@ -674,29 +688,53 @@ def run_train_job(job_id: str):
     train_cmd = train_cmd.replace("__GPU_OUTDIR__", str(outdir))
     publish_cmd = publish_cmd.replace("__GPU_OUTDIR__", str(outdir))
 
+    data["state"] = "running"
+    data["notes"] = "training"
+    _write_job(data)
+
     code, log = _run_subprocess(train_cmd, cwd=workdir)
     if code != 0:
         data["state"] = "failed"
         data["notes"] = log
         _write_job(data)
-        raise HTTPException(status_code=500, detail=f"train failed: {log[-2000:]}")
+        return
+
+    data["notes"] = "publishing to huggingface"
+    _write_job(data)
 
     code, pub_log = _run_subprocess(publish_cmd, cwd=workdir)
     if code != 0:
         data["state"] = "failed"
         data["notes"] = pub_log
         _write_job(data)
-        raise HTTPException(status_code=500, detail=f"publish failed: {pub_log[-2000:]}")
-
-    hf_link = ""
-    for line in reversed((pub_log or "").splitlines()):
-        line = line.strip()
-        if line.startswith("https://huggingface.co/"):
-            hf_link = line
-            break
+        return
 
     data["state"] = "done"
     data["notes"] = pub_log[-4000:]
-    data["hf_link"] = hf_link or None
+    data["hf_link"] = _extract_hf_link(pub_log) or None
     _write_job(data)
+
+
+@app.post("/v1/train-jobs/{job_id}/run", response_model=TrainJobStatus)
+def run_train_job(job_id: str):
+    load_dotenv()
+    data = _read_job(job_id)
+    state = str(data.get("state") or "")
+    if state == "running":
+        return data
+    if state == "done":
+        return data
+
+    ok, why = _gpu_ready()
+    if not ok:
+        data["state"] = "queued"
+        data["notes"] = why
+        _write_job(data)
+        raise HTTPException(status_code=409, detail=why)
+
+    data["state"] = "running"
+    data["notes"] = "training queued"
+    _write_job(data)
+    t = threading.Thread(target=_run_train_job_worker, args=(job_id,), daemon=True)
+    t.start()
     return data

@@ -356,17 +356,6 @@ def create_test_session(api_url: str, agent_name: str, hf_model: str, chat_id: i
     return r.json()
 
 
-def launch_test_session(api_url: str, session_id: str) -> dict:
-    r = requests.post(api_url.rstrip("/") + f"/v1/sessions/{session_id}/launch", timeout=600)
-    if r.status_code >= 400:
-        try:
-            detail = r.json().get("detail", r.text)
-        except Exception:
-            detail = r.text
-        return {"error": detail, "status_code": r.status_code}
-    return r.json()
-
-
 def create_train_job(
     api_url: str,
     run_id: str,
@@ -414,8 +403,8 @@ def upload_train_job_artifacts(api_url: str, job_id: str, dataset_csv: Path, rep
                 pass
 
 
-def run_train_job(api_url: str, job_id: str) -> dict:
-    r = requests.post(api_url.rstrip("/") + f"/v1/train-jobs/{job_id}/run", timeout=60 * 60 * 6)
+def start_train_job(api_url: str, job_id: str) -> dict:
+    r = requests.post(api_url.rstrip("/") + f"/v1/train-jobs/{job_id}/run", timeout=120)
     if r.status_code >= 400:
         try:
             detail = r.json().get("detail", r.text)
@@ -423,6 +412,22 @@ def run_train_job(api_url: str, job_id: str) -> dict:
             detail = r.text
         return {"error": detail, "status_code": r.status_code}
     return r.json()
+
+
+def get_train_job(api_url: str, job_id: str) -> dict:
+    r = requests.get(api_url.rstrip("/") + f"/v1/train-jobs/{job_id}", timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+async def wait_for_train_job(api_url: str, job_id: str, poll_sec: int = 30) -> dict:
+    poll_sec = max(5, int(os.getenv("TRAIN_JOB_POLL_SEC", str(poll_sec))))
+    while True:
+        status = await asyncio.to_thread(get_train_job, api_url, job_id)
+        state = str(status.get("state") or "")
+        if state in {"done", "failed"}:
+            return status
+        await asyncio.sleep(poll_sec)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -613,9 +618,25 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 job_id = str(train_job.get("job_id") or "")
                 await asyncio.to_thread(upload_train_job_artifacts, gpu_api, job_id, ds_csv, ds_report)
                 await q.message.reply_text(f"GPU job создан: {job_id}. Запускаю...")
-                result = await asyncio.to_thread(run_train_job, gpu_api, job_id)
+                try:
+                    started = await asyncio.to_thread(start_train_job, gpu_api, job_id)
+                    if started.get("error"):
+                        await q.message.reply_text(
+                            f"Не удалось запустить обучение на GPU:\n{started.get('error')}"
+                        )
+                        return
+                    await q.message.reply_text(
+                        "Обучение запущено на GPU. Это может занять время — пришлю результат, когда завершится."
+                    )
+                    result = await wait_for_train_job(gpu_api, job_id)
+                except Exception as e:
+                    logger.exception("gpu train job failed: %s", e)
+                    await q.message.reply_text(f"Ошибка при ожидании обучения на GPU: {e}")
+                    return
                 if result.get("state") != "done":
-                    await q.message.reply_text(f"Обучение на GPU завершилось с ошибкой:\n{result.get('notes') or result.get('error') or result}")
+                    await q.message.reply_text(
+                        f"Обучение на GPU завершилось с ошибкой:\n{result.get('notes') or result.get('error') or result}"
+                    )
                     return
                 hf_link = str(result.get("hf_link") or "")
                 if not hf_link:
@@ -632,12 +653,7 @@ async def on_flow_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         q.message.chat_id,
                         int(os.getenv("TEST_SESSION_IDLE_SEC", "900")),
                     )
-                    session_id = str(session.get("session_id") or "")
-                    if session_id:
-                        launch = await asyncio.to_thread(launch_test_session, gpu_api, session_id)
-                        if launch.get("error"):
-                            logger.warning("test session launch failed: %s", launch.get("error"))
-                    test_link = build_test_bot_link(session_id)
+                    test_link = build_test_bot_link(str(session.get("session_id", "")))
                     if test_link.startswith("session:"):
                         test_link = ""
                 except Exception as e:
